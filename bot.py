@@ -1,12 +1,12 @@
 import io
 import json
 import re
+import os
 import asyncio
 from datetime import datetime, timedelta
 
 import discord
 import pytesseract
-import requests
 
 from PIL import (
     Image,
@@ -18,12 +18,7 @@ from PIL import (
 # НАСТРОЙКИ
 # =========================================
 
-import os
-
 TOKEN = os.getenv("DISCORD_TOKEN")
-print("TOKEN:", TOKEN)
-
-CHANNEL_NAME = "🕘таймер"
 
 SAVE_FILE = "submarines.json"
 
@@ -395,8 +390,11 @@ async def send_ready_alert(
     await asyncio.sleep(600)
 
     try:
+
         await msg.delete()
+
     except:
+
         pass
 
 # =========================================
@@ -456,7 +454,6 @@ async def on_ready():
 
     global return_times
     global ready_sent
-    global dashboard_message
 
     print(
         f"Logged as {client.user}"
@@ -468,24 +465,7 @@ async def on_ready():
         [False] * len(return_times)
     )
 
-    for guild in client.guilds:
-
-        for channel in guild.text_channels:
-
-            if (
-                channel.name ==
-                CHANNEL_NAME
-            ):
-
-                dashboard_message = (
-                    await channel.send(
-                        embeds=build_embeds()
-                    )
-                )
-
-                print(
-                    "Dashboard created"
-                )
+    print("Bot ready")
 
     client.loop.create_task(
         updater_loop()
@@ -496,6 +476,7 @@ async def on_message(message):
 
     global return_times
     global ready_sent
+    global dashboard_message
 
     if message.author.bot:
         return
@@ -544,6 +525,32 @@ async def on_message(message):
         )
 
         save_times(return_times)
+
+        embeds = build_embeds()
+
+        if dashboard_message:
+
+            try:
+
+                await dashboard_message.edit(
+                    embeds=embeds
+                )
+
+            except:
+
+                dashboard_message = await (
+                    message.channel.send(
+                        embeds=embeds
+                    )
+                )
+
+        else:
+
+            dashboard_message = await (
+                message.channel.send(
+                    embeds=embeds
+                )
+            )
 
         await message.reply(
             "🚢 Таймеры обновлены"
