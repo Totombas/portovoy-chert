@@ -190,6 +190,10 @@ def format_remaining(rt):
         delta.total_seconds() // 60
     )
 
+    if mins <= 0:
+
+        return "<1 мин", 0
+
     d = mins // 1440
 
     h = (
@@ -330,6 +334,8 @@ async def send_ready_alert(
     rt
 ):
 
+    global dashboard_message
+
     embed = discord.Embed(
 
         title=(
@@ -354,7 +360,7 @@ async def send_ready_alert(
 
     embed.add_field(
         name="Статус",
-        value="ВОЗВРАЩАЙ ЛОДКУ 🚢",
+        value="💰 +БАБКИ, ЗАПУСКАЙ ПО НОВОЙ 💰",
         inline=False
     )
 
@@ -363,7 +369,25 @@ async def send_ready_alert(
         embed=embed
     )
 
-    await asyncio.sleep(600)
+    # возвращаем dashboard вниз чата
+    if dashboard_message:
+
+        try:
+
+            embeds = build_embeds()
+
+            await dashboard_message.delete()
+
+            dashboard_message = await channel.send(
+                embeds=embeds
+            )
+
+        except Exception as e:
+
+            print(e)
+
+    # удаляем alert через 24 часа
+    await asyncio.sleep(86400)
 
     try:
 
@@ -483,7 +507,6 @@ async def on_message(message):
             img_bytes
         )
 
-        # OCR protection
         if len(new_times) != 4:
 
             return
@@ -509,6 +532,7 @@ async def on_message(message):
 
                 pass
 
+        # создаем новый внизу чата
         dashboard_message = await (
             message.channel.send(
                 embeds=embeds
