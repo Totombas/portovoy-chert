@@ -23,7 +23,7 @@ import os
 TOKEN = os.getenv("DISCORD_TOKEN")
 print("TOKEN:", TOKEN)
 
-CHANNEL_NAME = "подлодки"
+CHANNEL_NAME = "🕘таймер"
 
 SAVE_FILE = "submarines.json"
 
