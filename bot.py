@@ -18,7 +18,9 @@ from PIL import (
 # НАСТРОЙКИ
 # =========================================
 
-TOKEN = "PASTE_TOKEN_LATER"
+import os
+
+TOKEN = os.environ["DISCORD_TOKEN"]
 
 CHANNEL_NAME = "подлодки"
 
