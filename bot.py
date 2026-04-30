@@ -90,8 +90,10 @@ def parse_image(image_bytes):
         io.BytesIO(image_bytes)
     )
 
+    # grayscale
     img = img.convert("L")
 
+    # upscale
     img = img.resize(
         (
             img.width * 4,
@@ -99,18 +101,25 @@ def parse_image(image_bytes):
         )
     )
 
+    # contrast
     img = ImageOps.autocontrast(img)
 
+    # sharpen
     img = img.filter(
         ImageFilter.SHARPEN
     )
 
+    # threshold
     img = img.point(
         lambda x: 255 if x > 140 else 0
     )
 
-    text = pytesseract.image_to_string(img)
+    text = pytesseract.image_to_string(
+        img,
+        config="--psm 6"
+    )
 
+    # OCR fixes
     text = (
         text
         .replace("Om", "0m")
@@ -119,44 +128,50 @@ def parse_image(image_bytes):
         .replace("Ih", "1h")
     )
 
-    lines = [
+    print("========== OCR ==========")
+    print(text)
+    print("=========================")
 
-        l
+    voyage_lines = []
 
-        for l in text.splitlines()
+    for line in text.splitlines():
 
-        if "Voyage complete in" in l
-    ]
+        if "Voyage complete in" in line:
+
+            voyage_lines.append(line)
 
     result = []
 
-    for line in lines[:4]:
+    for line in voyage_lines:
 
-        m = re.search(
-            r'(?:(\d+)d)?\s*'
-            r'(?:(\d+)h)?\s*'
+        match = re.search(
+            r'Voyage complete in\s*'
+            r'(?:(\d+)d\s*)?'
+            r'(?:(\d+)h\s*)?'
             r'(\d+)m',
             line
         )
 
-        if not m:
+        if not match:
             continue
 
-        d = int(m.group(1) or 0)
+        days = int(match.group(1) or 0)
 
-        h = int(m.group(2) or 0)
+        hours = int(match.group(2) or 0)
 
-        m_ = int(m.group(3))
+        minutes = int(match.group(3))
 
-        total = (
-            d * 1440 +
-            h * 60 +
-            m_
+        total_minutes = (
+            days * 1440 +
+            hours * 60 +
+            minutes
         )
 
         result.append(
             datetime.now() +
-            timedelta(minutes=total)
+            timedelta(
+                minutes=total_minutes
+            )
         )
 
     return result
@@ -507,6 +522,7 @@ async def on_message(message):
             img_bytes
         )
 
+        # защита от плохого OCR
         if len(new_times) != 4:
 
             await message.reply(
