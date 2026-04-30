@@ -20,7 +20,8 @@ from PIL import (
 
 import os
 
-TOKEN = os.environ["DISCORD_TOKEN"]
+TOKEN = os.getenv("DISCORD_TOKEN")
+print("TOKEN:", TOKEN)
 
 CHANNEL_NAME = "подлодки"
 
