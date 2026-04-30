@@ -34,9 +34,7 @@ USER_IDS = [
     "293071176631189504",  # darianvein
 ]
 
-pytesseract.pytesseract.tesseract_cmd = (
-    r"/usr/bin/tesseract"
-)
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # =========================================
 # DISCORD
