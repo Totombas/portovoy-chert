@@ -40,58 +40,53 @@ return_times = []
 ready_sent = []
 
 
-# =========================================
-# TREASURY CONFIG
-# =========================================
-
 ITEMS = {
     "gold_necklace": {
         "title": "Ожерелье",
         "emoji_name": "Extravagant_salvaged_necklace",
-        "price": 0,
+        "price": 34500,
         "group": "gold",
     },
     "gold_earring": {
         "title": "Серьга",
         "emoji_name": "Extravagant_salvaged_earring",
-        "price": 0,
+        "price": 30000,
         "group": "gold",
     },
     "gold_bracelet": {
         "title": "Браслет",
         "emoji_name": "Extravagant_salvaged_bracelet",
-        "price": 0,
+        "price": 28500,
         "group": "gold",
     },
     "gold_ring": {
         "title": "Кольцо",
         "emoji_name": "Extravagant_salvaged_ring",
-        "price": 0,
+        "price": 27000,
         "group": "gold",
     },
-
     "silver_necklace": {
         "title": "Ожерелье",
         "emoji_name": "Salvaged_necklace",
-        "price": 0,
+        "price": 13000,
         "group": "silver",
     },
     "silver_earring": {
         "title": "Серьга",
         "emoji_name": "Salvaged_earring",
-        "price": 0,
+        "price": 10000,
         "group": "silver",
     },
     "silver_bracelet": {
         "title": "Браслет",
         "emoji_name": "Salvaged_bracelet",
-        "price": 0,
+        "price": 9000,
         "group": "silver",
     },
     "silver_ring": {
         "title": "Кольцо",
         "emoji_name": "Salvaged_ring",
-        "price": 0,
+        "price": 8000,
         "group": "silver",
     },
 }
@@ -104,10 +99,6 @@ ITEM_ORDER = [
 ]
 
 
-# =========================================
-# TIME
-# =========================================
-
 def now_utc():
     return datetime.utcnow()
 
@@ -119,10 +110,6 @@ def to_andryukha_time(dt):
 def to_valera_time(dt):
     return dt + timedelta(hours=VALERA_OFFSET)
 
-
-# =========================================
-# JSON
-# =========================================
 
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -145,7 +132,6 @@ def load_times():
                 datetime.fromisoformat(x)
                 for x in json.load(f)
             ]
-
     except:
         return []
 
@@ -158,6 +144,7 @@ def default_treasury():
         },
         "message_id": None,
         "channel_id": None,
+        "updated_at": None,
     }
 
 
@@ -172,7 +159,6 @@ def load_treasury():
     try:
         with open(TREASURY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-
     except:
         data = default_treasury()
 
@@ -188,6 +174,9 @@ def load_treasury():
 
     if "channel_id" not in data:
         data["channel_id"] = None
+
+    if "updated_at" not in data:
+        data["updated_at"] = None
 
     save_treasury(data)
 
@@ -205,10 +194,6 @@ def save_treasury(data):
             indent=2
         )
 
-
-# =========================================
-# OCR SUBMARINES
-# =========================================
 
 def parse_image(image_bytes):
     img = Image.open(
@@ -290,10 +275,6 @@ def parse_image(image_bytes):
 
     return result
 
-
-# =========================================
-# HELPERS
-# =========================================
 
 def get_ping_text():
     return " ".join(
@@ -401,6 +382,18 @@ def get_custom_emoji(guild, emoji_name):
     return "▫️"
 
 
+def item_total(data, item_id):
+    count = int(
+        data["inventory"].get(item_id, 0)
+    )
+
+    price = int(
+        ITEMS[item_id]["price"]
+    )
+
+    return count * price
+
+
 def item_line(guild, data, item_id):
     item = ITEMS[item_id]
 
@@ -413,12 +406,14 @@ def item_line(guild, data, item_id):
         data["inventory"].get(item_id, 0)
     )
 
-    price = int(item["price"])
-    total = count * price
+    total = item_total(
+        data,
+        item_id
+    )
 
     return (
         f"{emoji} **{item['title']}** — "
-        f"`{count}` × `{format_gil(price)}` = "
+        f"**{count}** шт. • "
         f"**{format_gil(total)}**"
     )
 
@@ -430,13 +425,79 @@ def group_total(data, group):
         if item["group"] != group:
             continue
 
-        count = int(
-            data["inventory"].get(item_id, 0)
+        total += item_total(
+            data,
+            item_id
         )
 
-        total += count * int(item["price"])
-
     return total
+
+
+def get_treasury_age_hours():
+    data = load_treasury()
+
+    updated_at = data.get("updated_at")
+
+    if not updated_at:
+        return None
+
+    try:
+        updated_dt = datetime.fromisoformat(updated_at)
+    except:
+        return None
+
+    delta = now_utc() - updated_dt
+
+    return delta.total_seconds() / 3600
+
+
+def get_treasury_status():
+    data = load_treasury()
+    updated_at = data.get("updated_at")
+
+    if not updated_at:
+        return (
+            "⚠️ Склад ещё не обновлялся",
+            "Нет данных",
+            0xF1C40F
+        )
+
+    try:
+        updated_dt = datetime.fromisoformat(updated_at)
+    except:
+        return (
+            "⚠️ Склад ещё не обновлялся",
+            "Нет данных",
+            0xF1C40F
+        )
+
+    age_hours = (
+        now_utc() - updated_dt
+    ).total_seconds() / 3600
+
+    local_time = to_andryukha_time(
+        updated_dt
+    ).strftime("%d.%m • %H:%M")
+
+    if age_hours < 40:
+        return (
+            "📦 Склад обновлён недавно",
+            local_time,
+            0x2ECC71
+        )
+
+    if age_hours < 72:
+        return (
+            "⚠️ Склад пора обновить",
+            local_time,
+            0xF1C40F
+        )
+
+    return (
+        "🚨 Склад давно не обновлялся",
+        local_time,
+        0xE74C3C
+    )
 
 
 def build_treasury_embed(guild):
@@ -467,17 +528,16 @@ def build_treasury_embed(guild):
     silver_total = group_total(data, "silver")
     total = gold_total + silver_total
 
+    status_text, updated_text, color = get_treasury_status()
+
     embed = discord.Embed(
         title="📦 Склад FC",
-        description=(
-            "Текущее содержимое сундука компании.\n"
-            "Кнопки ниже перезаписывают количества."
-        ),
-        color=0xF1C40F
+        description="Текущее содержимое сундука компании.",
+        color=color
     )
 
     embed.add_field(
-        name="🥇 Золото",
+        name="🏅 Золото",
         value=(
             "\n".join(gold_lines) +
             f"\n\n**Итого золото:** `{format_gil(gold_total)}`"
@@ -500,11 +560,10 @@ def build_treasury_embed(guild):
         inline=False
     )
 
-    embed.set_footer(
-        text=(
-            "Портовый чёрт считает честно. "
-            "Почти без проклятий."
-        )
+    embed.add_field(
+        name=status_text,
+        value=f"🕒 Последнее обновление: `{updated_text}`",
+        inline=False
     )
 
     return embed
@@ -534,7 +593,6 @@ async def refresh_treasury_message(interaction=None, channel=None):
             message = await target_channel.fetch_message(
                 int(data["message_id"])
             )
-
         except:
             message = None
 
@@ -543,7 +601,6 @@ async def refresh_treasury_message(interaction=None, channel=None):
             embed=embed,
             view=view
         )
-
     else:
         message = await target_channel.send(
             embed=embed,
@@ -558,11 +615,7 @@ async def refresh_treasury_message(interaction=None, channel=None):
     return message
 
 
-# =========================================
-# TREASURY UI
-# =========================================
-
-class GoldModal(ui.Modal, title="🥇 Обновить золото"):
+class GoldModal(ui.Modal, title="🏅 Обновить золото"):
 
     necklace = ui.TextInput(
         label="Ожерелье",
@@ -600,11 +653,13 @@ class GoldModal(ui.Modal, title="🥇 Обновить золото"):
             data["inventory"]["gold_earring"] = int(str(self.earring))
             data["inventory"]["gold_bracelet"] = int(str(self.bracelet))
             data["inventory"]["gold_ring"] = int(str(self.ring))
+            data["updated_at"] = now_utc().isoformat()
 
         except:
             await interaction.response.send_message(
                 "Нужно вводить только числа.",
-                ephemeral=True
+                ephemeral=True,
+                delete_after=10
             )
             return
 
@@ -614,9 +669,18 @@ class GoldModal(ui.Modal, title="🥇 Обновить золото"):
             interaction=interaction
         )
 
+        if dashboard_message:
+            try:
+                await dashboard_message.edit(
+                    embeds=build_embeds()
+                )
+            except Exception as e:
+                print("Dashboard update error:", e)
+
         await interaction.response.send_message(
-            "🥇 Золото обновлено.",
-            ephemeral=True
+            "Склад обновлён.",
+            ephemeral=True,
+            delete_after=10
         )
 
 
@@ -658,11 +722,13 @@ class SilverModal(ui.Modal, title="🥈 Обновить серебро"):
             data["inventory"]["silver_earring"] = int(str(self.earring))
             data["inventory"]["silver_bracelet"] = int(str(self.bracelet))
             data["inventory"]["silver_ring"] = int(str(self.ring))
+            data["updated_at"] = now_utc().isoformat()
 
         except:
             await interaction.response.send_message(
                 "Нужно вводить только числа.",
-                ephemeral=True
+                ephemeral=True,
+                delete_after=10
             )
             return
 
@@ -672,9 +738,18 @@ class SilverModal(ui.Modal, title="🥈 Обновить серебро"):
             interaction=interaction
         )
 
+        if dashboard_message:
+            try:
+                await dashboard_message.edit(
+                    embeds=build_embeds()
+                )
+            except Exception as e:
+                print("Dashboard update error:", e)
+
         await interaction.response.send_message(
-            "🥈 Серебро обновлено.",
-            ephemeral=True
+            "Склад обновлён.",
+            ephemeral=True,
+            delete_after=10
         )
 
 
@@ -687,7 +762,7 @@ class TreasuryView(ui.View):
 
     @ui.button(
         label="Золото",
-        emoji="🥇",
+        emoji="🏅",
         style=discord.ButtonStyle.primary,
         custom_id="treasury_gold"
     )
@@ -707,26 +782,23 @@ class TreasuryView(ui.View):
             SilverModal()
         )
 
-    @ui.button(
-        label="Обновить",
-        emoji="🔄",
-        style=discord.ButtonStyle.success,
-        custom_id="treasury_refresh"
+
+def build_treasury_status_embed():
+    status_text, updated_text, color = get_treasury_status()
+
+    embed = discord.Embed(
+        title="📦 Статус склада",
+        color=color
     )
-    async def refresh_button(self, interaction, button):
-        await refresh_treasury_message(
-            interaction=interaction
-        )
 
-        await interaction.response.send_message(
-            "Склад обновлён.",
-            ephemeral=True
-        )
+    embed.add_field(
+        name=status_text,
+        value=f"🕒 Последнее обновление: `{updated_text}`",
+        inline=False
+    )
 
+    return embed
 
-# =========================================
-# SUBMARINE EMBEDS
-# =========================================
 
 def build_embeds():
     embeds = []
@@ -768,12 +840,12 @@ def build_embeds():
 
         embeds.append(embed)
 
+    embeds.append(
+        build_treasury_status_embed()
+    )
+
     return embeds
 
-
-# =========================================
-# READY ALERT
-# =========================================
 
 async def send_ready_alert(
     channel,
@@ -830,14 +902,9 @@ async def send_ready_alert(
 
     try:
         await msg.delete()
-
     except:
         pass
 
-
-# =========================================
-# LOOP
-# =========================================
 
 async def updater_loop():
     global dashboard_message
@@ -876,10 +943,6 @@ async def updater_loop():
             UPDATE_INTERVAL
         )
 
-
-# =========================================
-# EVENTS
-# =========================================
 
 @client.event
 async def on_ready():
@@ -925,7 +988,6 @@ async def on_message(message):
 
         try:
             await message.delete()
-
         except:
             pass
 
@@ -966,7 +1028,6 @@ async def on_message(message):
         if dashboard_message:
             try:
                 await dashboard_message.delete()
-
             except:
                 pass
 
@@ -976,7 +1037,6 @@ async def on_message(message):
 
         try:
             await message.delete()
-
         except:
             pass
 
@@ -985,9 +1045,5 @@ async def on_message(message):
     except Exception as e:
         print(e)
 
-
-# =========================================
-# START
-# =========================================
 
 client.run(TOKEN)
