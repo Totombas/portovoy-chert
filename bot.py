@@ -6,12 +6,17 @@ import asyncio
 from datetime import datetime, timedelta
 
 import discord
-import pytesseract
+from discord import ui
 from PIL import Image, ImageFilter, ImageOps
+import pytesseract
+
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 SAVE_FILE = "submarines.json"
+
+DATA_DIR = "data"
+TREASURY_FILE = os.path.join(DATA_DIR, "treasury.json")
 
 UPDATE_INTERVAL = 15
 
@@ -31,10 +36,73 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 dashboard_message = None
-
 return_times = []
-
 ready_sent = []
+
+
+# =========================================
+# TREASURY CONFIG
+# =========================================
+
+ITEMS = {
+    "gold_necklace": {
+        "title": "Ожерелье",
+        "emoji_name": "Extravagant_salvaged_necklace",
+        "price": 0,
+        "group": "gold",
+    },
+    "gold_earring": {
+        "title": "Серьга",
+        "emoji_name": "Extravagant_salvaged_earring",
+        "price": 0,
+        "group": "gold",
+    },
+    "gold_bracelet": {
+        "title": "Браслет",
+        "emoji_name": "Extravagant_salvaged_bracelet",
+        "price": 0,
+        "group": "gold",
+    },
+    "gold_ring": {
+        "title": "Кольцо",
+        "emoji_name": "Extravagant_salvaged_ring",
+        "price": 0,
+        "group": "gold",
+    },
+
+    "silver_necklace": {
+        "title": "Ожерелье",
+        "emoji_name": "Salvaged_necklace",
+        "price": 0,
+        "group": "silver",
+    },
+    "silver_earring": {
+        "title": "Серьга",
+        "emoji_name": "Salvaged_earring",
+        "price": 0,
+        "group": "silver",
+    },
+    "silver_bracelet": {
+        "title": "Браслет",
+        "emoji_name": "Salvaged_bracelet",
+        "price": 0,
+        "group": "silver",
+    },
+    "silver_ring": {
+        "title": "Кольцо",
+        "emoji_name": "Salvaged_ring",
+        "price": 0,
+        "group": "silver",
+    },
+}
+
+ITEM_ORDER = [
+    "necklace",
+    "earring",
+    "bracelet",
+    "ring",
+]
+
 
 # =========================================
 # TIME
@@ -43,46 +111,106 @@ ready_sent = []
 def now_utc():
     return datetime.utcnow()
 
+
 def to_andryukha_time(dt):
     return dt + timedelta(hours=ANDRYUKHA_OFFSET)
 
+
 def to_valera_time(dt):
     return dt + timedelta(hours=VALERA_OFFSET)
+
 
 # =========================================
 # JSON
 # =========================================
 
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
 def save_times(times):
-
-    with open(SAVE_FILE, "w") as f:
-
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
         json.dump(
             [x.isoformat() for x in times],
-            f
+            f,
+            ensure_ascii=False,
+            indent=2
         )
 
+
 def load_times():
-
     try:
-
-        with open(SAVE_FILE) as f:
-
+        with open(SAVE_FILE, encoding="utf-8") as f:
             return [
                 datetime.fromisoformat(x)
                 for x in json.load(f)
             ]
 
     except:
-
         return []
 
+
+def default_treasury():
+    return {
+        "inventory": {
+            item_id: 0
+            for item_id in ITEMS
+        },
+        "message_id": None,
+        "channel_id": None,
+    }
+
+
+def load_treasury():
+    ensure_data_dir()
+
+    if not os.path.exists(TREASURY_FILE):
+        data = default_treasury()
+        save_treasury(data)
+        return data
+
+    try:
+        with open(TREASURY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+    except:
+        data = default_treasury()
+
+    if "inventory" not in data:
+        data["inventory"] = {}
+
+    for item_id in ITEMS:
+        if item_id not in data["inventory"]:
+            data["inventory"][item_id] = 0
+
+    if "message_id" not in data:
+        data["message_id"] = None
+
+    if "channel_id" not in data:
+        data["channel_id"] = None
+
+    save_treasury(data)
+
+    return data
+
+
+def save_treasury(data):
+    ensure_data_dir()
+
+    with open(TREASURY_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
 # =========================================
-# OCR
+# OCR SUBMARINES
 # =========================================
 
 def parse_image(image_bytes):
-
     img = Image.open(
         io.BytesIO(image_bytes)
     )
@@ -126,20 +254,17 @@ def parse_image(image_bytes):
     voyage_lines = []
 
     for line in text.splitlines():
-
         if "Voyage complete in" in line:
-
             voyage_lines.append(line)
 
     result = []
 
     for line in voyage_lines:
-
         match = re.search(
-            r'Voyage complete in\s*'
-            r'(?:(\d+)d\s*)?'
-            r'(?:(\d+)h\s*)?'
-            r'(\d+)m',
+            r"Voyage complete in\s*"
+            r"(?:(\d+)d\s*)?"
+            r"(?:(\d+)h\s*)?"
+            r"(\d+)m",
             line
         )
 
@@ -147,9 +272,7 @@ def parse_image(image_bytes):
             continue
 
         days = int(match.group(1) or 0)
-
         hours = int(match.group(2) or 0)
-
         minutes = int(match.group(3))
 
         total_minutes = (
@@ -167,23 +290,22 @@ def parse_image(image_bytes):
 
     return result
 
+
 # =========================================
 # HELPERS
 # =========================================
 
 def get_ping_text():
-
     return " ".join(
         f"<@{i}>"
         for i in USER_IDS
     )
 
-def format_remaining(rt):
 
+def format_remaining(rt):
     delta = rt - now_utc()
 
     if delta.total_seconds() <= 0:
-
         return "ГОТОВО ✅", 0
 
     mins = int(
@@ -191,19 +313,13 @@ def format_remaining(rt):
     )
 
     if mins <= 0:
-
         return "<1 мин", 0
 
     d = mins // 1440
-
-    h = (
-        (mins % 1440) // 60
-    )
-
+    h = (mins % 1440) // 60
     m = mins % 60
 
     if d:
-
         return (
             f"{d}д {h}ч {m}м",
             mins
@@ -214,8 +330,8 @@ def format_remaining(rt):
         mins
     )
 
-def get_color(mins):
 
+def get_color(mins):
     if mins <= 0:
         return 0x2ECC71
 
@@ -230,8 +346,8 @@ def get_color(mins):
 
     return 0x00BFFF
 
-def build_bar(mins):
 
+def build_bar(mins):
     max_m = 48 * 60
 
     ratio = min(
@@ -246,23 +362,18 @@ def build_bar(mins):
     empty = 10 - filled
 
     if mins <= 0:
-
         c = "🟩"
 
     elif mins > 1440:
-
         c = "🟥"
 
     elif mins > 720:
-
         c = "🟧"
 
     elif mins > 360:
-
         c = "🟨"
 
     else:
-
         c = "🟦"
 
     return (
@@ -270,29 +381,364 @@ def build_bar(mins):
         "⬛" * empty
     )
 
+
+def format_gil(value):
+    return f"{value:,}".replace(",", " ")
+
+
+def get_custom_emoji(guild, emoji_name):
+    if guild is None:
+        return ""
+
+    found = discord.utils.get(
+        guild.emojis,
+        name=emoji_name
+    )
+
+    if found:
+        return str(found)
+
+    return "▫️"
+
+
+def item_line(guild, data, item_id):
+    item = ITEMS[item_id]
+
+    emoji = get_custom_emoji(
+        guild,
+        item["emoji_name"]
+    )
+
+    count = int(
+        data["inventory"].get(item_id, 0)
+    )
+
+    price = int(item["price"])
+    total = count * price
+
+    return (
+        f"{emoji} **{item['title']}** — "
+        f"`{count}` × `{format_gil(price)}` = "
+        f"**{format_gil(total)}**"
+    )
+
+
+def group_total(data, group):
+    total = 0
+
+    for item_id, item in ITEMS.items():
+        if item["group"] != group:
+            continue
+
+        count = int(
+            data["inventory"].get(item_id, 0)
+        )
+
+        total += count * int(item["price"])
+
+    return total
+
+
+def build_treasury_embed(guild):
+    data = load_treasury()
+
+    gold_lines = []
+    silver_lines = []
+
+    for kind in ITEM_ORDER:
+        gold_lines.append(
+            item_line(
+                guild,
+                data,
+                f"gold_{kind}"
+            )
+        )
+
+    for kind in ITEM_ORDER:
+        silver_lines.append(
+            item_line(
+                guild,
+                data,
+                f"silver_{kind}"
+            )
+        )
+
+    gold_total = group_total(data, "gold")
+    silver_total = group_total(data, "silver")
+    total = gold_total + silver_total
+
+    embed = discord.Embed(
+        title="📦 Склад FC",
+        description=(
+            "Текущее содержимое сундука компании.\n"
+            "Кнопки ниже перезаписывают количества."
+        ),
+        color=0xF1C40F
+    )
+
+    embed.add_field(
+        name="🥇 Золото",
+        value=(
+            "\n".join(gold_lines) +
+            f"\n\n**Итого золото:** `{format_gil(gold_total)}`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🥈 Серебро",
+        value=(
+            "\n".join(silver_lines) +
+            f"\n\n**Итого серебро:** `{format_gil(silver_total)}`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="💰 Общая сумма",
+        value=f"**{format_gil(total)} gil**",
+        inline=False
+    )
+
+    embed.set_footer(
+        text=(
+            "Портовый чёрт считает честно. "
+            "Почти без проклятий."
+        )
+    )
+
+    return embed
+
+
+async def refresh_treasury_message(interaction=None, channel=None):
+    data = load_treasury()
+
+    target_channel = channel
+
+    if interaction is not None:
+        target_channel = interaction.channel
+
+    if target_channel is None:
+        return
+
+    embed = build_treasury_embed(
+        target_channel.guild
+    )
+
+    view = TreasuryView()
+
+    message = None
+
+    if data.get("message_id"):
+        try:
+            message = await target_channel.fetch_message(
+                int(data["message_id"])
+            )
+
+        except:
+            message = None
+
+    if message:
+        await message.edit(
+            embed=embed,
+            view=view
+        )
+
+    else:
+        message = await target_channel.send(
+            embed=embed,
+            view=view
+        )
+
+        data["message_id"] = message.id
+        data["channel_id"] = target_channel.id
+
+        save_treasury(data)
+
+    return message
+
+
 # =========================================
-# EMBEDS
+# TREASURY UI
+# =========================================
+
+class GoldModal(ui.Modal, title="🥇 Обновить золото"):
+
+    necklace = ui.TextInput(
+        label="Ожерелье",
+        placeholder="Например: 43",
+        required=True,
+        max_length=4
+    )
+
+    earring = ui.TextInput(
+        label="Серьга",
+        placeholder="Например: 47",
+        required=True,
+        max_length=4
+    )
+
+    bracelet = ui.TextInput(
+        label="Браслет",
+        placeholder="Например: 13",
+        required=True,
+        max_length=4
+    )
+
+    ring = ui.TextInput(
+        label="Кольцо",
+        placeholder="Например: 29",
+        required=True,
+        max_length=4
+    )
+
+    async def on_submit(self, interaction):
+        data = load_treasury()
+
+        try:
+            data["inventory"]["gold_necklace"] = int(str(self.necklace))
+            data["inventory"]["gold_earring"] = int(str(self.earring))
+            data["inventory"]["gold_bracelet"] = int(str(self.bracelet))
+            data["inventory"]["gold_ring"] = int(str(self.ring))
+
+        except:
+            await interaction.response.send_message(
+                "Нужно вводить только числа.",
+                ephemeral=True
+            )
+            return
+
+        save_treasury(data)
+
+        await refresh_treasury_message(
+            interaction=interaction
+        )
+
+        await interaction.response.send_message(
+            "🥇 Золото обновлено.",
+            ephemeral=True
+        )
+
+
+class SilverModal(ui.Modal, title="🥈 Обновить серебро"):
+
+    necklace = ui.TextInput(
+        label="Ожерелье",
+        placeholder="Например: 85",
+        required=True,
+        max_length=4
+    )
+
+    earring = ui.TextInput(
+        label="Серьга",
+        placeholder="Например: 57",
+        required=True,
+        max_length=4
+    )
+
+    bracelet = ui.TextInput(
+        label="Браслет",
+        placeholder="Например: 30",
+        required=True,
+        max_length=4
+    )
+
+    ring = ui.TextInput(
+        label="Кольцо",
+        placeholder="Например: 40",
+        required=True,
+        max_length=4
+    )
+
+    async def on_submit(self, interaction):
+        data = load_treasury()
+
+        try:
+            data["inventory"]["silver_necklace"] = int(str(self.necklace))
+            data["inventory"]["silver_earring"] = int(str(self.earring))
+            data["inventory"]["silver_bracelet"] = int(str(self.bracelet))
+            data["inventory"]["silver_ring"] = int(str(self.ring))
+
+        except:
+            await interaction.response.send_message(
+                "Нужно вводить только числа.",
+                ephemeral=True
+            )
+            return
+
+        save_treasury(data)
+
+        await refresh_treasury_message(
+            interaction=interaction
+        )
+
+        await interaction.response.send_message(
+            "🥈 Серебро обновлено.",
+            ephemeral=True
+        )
+
+
+class TreasuryView(ui.View):
+
+    def __init__(self):
+        super().__init__(
+            timeout=None
+        )
+
+    @ui.button(
+        label="Золото",
+        emoji="🥇",
+        style=discord.ButtonStyle.primary,
+        custom_id="treasury_gold"
+    )
+    async def gold_button(self, interaction, button):
+        await interaction.response.send_modal(
+            GoldModal()
+        )
+
+    @ui.button(
+        label="Серебро",
+        emoji="🥈",
+        style=discord.ButtonStyle.secondary,
+        custom_id="treasury_silver"
+    )
+    async def silver_button(self, interaction, button):
+        await interaction.response.send_modal(
+            SilverModal()
+        )
+
+    @ui.button(
+        label="Обновить",
+        emoji="🔄",
+        style=discord.ButtonStyle.success,
+        custom_id="treasury_refresh"
+    )
+    async def refresh_button(self, interaction, button):
+        await refresh_treasury_message(
+            interaction=interaction
+        )
+
+        await interaction.response.send_message(
+            "Склад обновлён.",
+            ephemeral=True
+        )
+
+
+# =========================================
+# SUBMARINE EMBEDS
 # =========================================
 
 def build_embeds():
-
     embeds = []
 
     for i, rt in enumerate(
         return_times,
         1
     ):
-
-        left, mins = (
-            format_remaining(rt)
-        )
+        left, mins = format_remaining(rt)
 
         embed = discord.Embed(
-
-            title=(
-                f"🚢 Подлодка #{i}"
-            ),
-
+            title=f"🚢 Подлодка #{i}",
             color=get_color(mins)
         )
 
@@ -324,6 +770,7 @@ def build_embeds():
 
     return embeds
 
+
 # =========================================
 # READY ALERT
 # =========================================
@@ -333,16 +780,13 @@ async def send_ready_alert(
     index,
     rt
 ):
-
     global dashboard_message
 
     embed = discord.Embed(
-
         title=(
             f"🚨 ПОДЛОДКА #{index} "
             f"ГОТОВА"
         ),
-
         color=0x2ECC71
     )
 
@@ -369,11 +813,8 @@ async def send_ready_alert(
         embed=embed
     )
 
-    # возвращаем dashboard вниз чата
     if dashboard_message:
-
         try:
-
             embeds = build_embeds()
 
             await dashboard_message.delete()
@@ -383,48 +824,39 @@ async def send_ready_alert(
             )
 
         except Exception as e:
-
             print(e)
 
-    # удаляем alert через 24 часа
     await asyncio.sleep(86400)
 
     try:
-
         await msg.delete()
 
     except:
-
         pass
+
 
 # =========================================
 # LOOP
 # =========================================
 
 async def updater_loop():
-
     global dashboard_message
 
     await client.wait_until_ready()
 
     while not client.is_closed():
-
         try:
-
             if dashboard_message:
-
                 await dashboard_message.edit(
                     embeds=build_embeds()
                 )
 
             for i, rt in enumerate(return_times):
-
                 if (
                     not ready_sent[i]
                     and
                     now_utc() >= rt
                 ):
-
                     channel = dashboard_message.channel
 
                     asyncio.create_task(
@@ -438,12 +870,12 @@ async def updater_loop():
                     ready_sent[i] = True
 
         except Exception as e:
-
             print("Loop error:", e)
 
         await asyncio.sleep(
             UPDATE_INTERVAL
         )
+
 
 # =========================================
 # EVENTS
@@ -451,12 +883,15 @@ async def updater_loop():
 
 @client.event
 async def on_ready():
-
     global return_times
     global ready_sent
 
     print(
         f"Logged as {client.user}"
+    )
+
+    client.add_view(
+        TreasuryView()
     )
 
     return_times = load_times()
@@ -471,9 +906,9 @@ async def on_ready():
         updater_loop()
     )
 
+
 @client.event
 async def on_message(message):
-
     global return_times
     global ready_sent
     global dashboard_message
@@ -481,34 +916,41 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    content = message.content.strip().lower()
+
+    if content in ["!treasury", "!склад", "!fc"]:
+        await refresh_treasury_message(
+            channel=message.channel
+        )
+
+        try:
+            await message.delete()
+
+        except:
+            pass
+
+        return
+
     if not message.attachments:
         return
 
-    attachment = (
-        message.attachments[0]
-    )
+    attachment = message.attachments[0]
 
     if not (
         attachment.filename.endswith(".png")
-        or
-        attachment.filename.endswith(".jpg")
-        or
-        attachment.filename.endswith(".jpeg")
+        or attachment.filename.endswith(".jpg")
+        or attachment.filename.endswith(".jpeg")
     ):
         return
 
     try:
-
-        img_bytes = await (
-            attachment.read()
-        )
+        img_bytes = await attachment.read()
 
         new_times = parse_image(
             img_bytes
         )
 
         if len(new_times) != 4:
-
             return
 
         return_times = new_times
@@ -521,38 +963,28 @@ async def on_message(message):
 
         embeds = build_embeds()
 
-        # удаляем старый dashboard
         if dashboard_message:
-
             try:
-
                 await dashboard_message.delete()
 
             except:
-
                 pass
 
-        # создаем новый внизу чата
-        dashboard_message = await (
-            message.channel.send(
-                embeds=embeds
-            )
+        dashboard_message = await message.channel.send(
+            embeds=embeds
         )
 
-        # удаляем сообщение пользователя
         try:
-
             await message.delete()
 
         except:
-
             pass
 
         print("Timers updated")
 
     except Exception as e:
-
         print(e)
+
 
 # =========================================
 # START
