@@ -28,6 +28,11 @@ USER_IDS = [
     "293071176631189504",
 ]
 
+TIMER_CHANNEL_NAMES = [
+    "таймер",
+    "timer",
+]
+
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 intents = discord.Intents.default()
@@ -461,7 +466,7 @@ def item_total(data, item_id):
     return count * price
 
 
-def item_block(guild, data, item_id):
+def item_line(guild, data, item_id):
     item = ITEMS[item_id]
 
     emoji = get_custom_emoji(
@@ -479,8 +484,9 @@ def item_block(guild, data, item_id):
     )
 
     return (
-        f"{emoji} **{count}**\n"
-        f"> {item['title']} • **{format_gil(total)}**"
+        f"{emoji} **{item['title']}** — "
+        f"**{count}** шт. • "
+        f"**{format_gil(total)}**"
     )
 
 
@@ -551,12 +557,12 @@ def get_treasury_status():
 def build_treasury_embed(guild):
     data = load_treasury()
 
-    gold_blocks = []
-    silver_blocks = []
+    gold_lines = []
+    silver_lines = []
 
     for kind in ITEM_ORDER:
-        gold_blocks.append(
-            item_block(
+        gold_lines.append(
+            item_line(
                 guild,
                 data,
                 f"gold_{kind}"
@@ -564,8 +570,8 @@ def build_treasury_embed(guild):
         )
 
     for kind in ITEM_ORDER:
-        silver_blocks.append(
-            item_block(
+        silver_lines.append(
+            item_line(
                 guild,
                 data,
                 f"silver_{kind}"
@@ -587,9 +593,8 @@ def build_treasury_embed(guild):
     embed.add_field(
         name="🏅 Золото",
         value=(
-            "\n\n".join(gold_blocks) +
-            f"\n\n💰 **Итого золото**\n"
-            f"**{format_gil(gold_total)}**"
+            "\n".join(gold_lines) +
+            f"\n\n**Итого золото:** `{format_gil(gold_total)}`"
         ),
         inline=False
     )
@@ -597,15 +602,14 @@ def build_treasury_embed(guild):
     embed.add_field(
         name="🥈 Серебро",
         value=(
-            "\n\n".join(silver_blocks) +
-            f"\n\n💰 **Итого серебро**\n"
-            f"**{format_gil(silver_total)}**"
+            "\n".join(silver_lines) +
+            f"\n\n**Итого серебро:** `{format_gil(silver_total)}`"
         ),
         inline=False
     )
 
     embed.add_field(
-        name="💎 Общая сумма",
+        name="💰 Общая сумма",
         value=f"**{format_gil(total)} gil**",
         inline=False
     )
@@ -683,7 +687,7 @@ def build_embeds():
     return embeds
 
 
-async def get_saved_dashboard_message():
+async def find_timer_dashboard_message(guild):
     global dashboard_message
 
     if dashboard_message is not None:
@@ -694,34 +698,80 @@ async def get_saved_dashboard_message():
     channel_id = state.get("dashboard_channel_id")
     message_id = state.get("dashboard_message_id")
 
-    if not channel_id or not message_id:
+    if channel_id and message_id:
+        channel = client.get_channel(
+            int(channel_id)
+        )
+
+        if channel is None:
+            try:
+                channel = await client.fetch_channel(
+                    int(channel_id)
+                )
+            except:
+                channel = None
+
+        if channel is not None:
+            try:
+                dashboard_message = await channel.fetch_message(
+                    int(message_id)
+                )
+                return dashboard_message
+            except:
+                dashboard_message = None
+
+    if guild is None:
         return None
 
-    channel = client.get_channel(
-        int(channel_id)
-    )
+    timer_channel = None
 
-    if channel is None:
-        try:
-            channel = await client.fetch_channel(
-                int(channel_id)
-            )
-        except:
-            return None
+    for channel in guild.text_channels:
+        clean_name = channel.name.lower()
+
+        if clean_name in TIMER_CHANNEL_NAMES:
+            timer_channel = channel
+            break
+
+    if timer_channel is None:
+        for channel in guild.text_channels:
+            clean_name = channel.name.lower()
+
+            if "таймер" in clean_name or "timer" in clean_name:
+                timer_channel = channel
+                break
+
+    if timer_channel is None:
+        return None
 
     try:
-        dashboard_message = await channel.fetch_message(
-            int(message_id)
-        )
-        return dashboard_message
+        async for msg in timer_channel.history(limit=30):
+            if msg.author.id != client.user.id:
+                continue
 
-    except:
-        dashboard_message = None
-        return None
+            if not msg.embeds:
+                continue
+
+            for embed in msg.embeds:
+                if embed.title and "Подлодка" in embed.title:
+                    dashboard_message = msg
+
+                    save_submarine_state(
+                        dashboard_message_id=msg.id,
+                        dashboard_channel_id=msg.channel.id
+                    )
+
+                    return dashboard_message
+
+    except Exception as e:
+        print("Timer search error:", e)
+
+    return None
 
 
-async def update_dashboard_message():
-    message = await get_saved_dashboard_message()
+async def update_dashboard_message(guild=None):
+    message = await find_timer_dashboard_message(
+        guild
+    )
 
     if message is None:
         return
@@ -842,15 +892,17 @@ class GoldModal(ui.Modal):
 
         save_treasury(data)
 
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=False
+        )
+
         await refresh_treasury_message(
             interaction=interaction
         )
 
-        await update_dashboard_message()
-
-        await interaction.response.send_message(
-            "Склад обновлён.",
-            ephemeral=True
+        await update_dashboard_message(
+            guild=interaction.guild
         )
 
 
@@ -916,15 +968,17 @@ class SilverModal(ui.Modal):
 
         save_treasury(data)
 
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=False
+        )
+
         await refresh_treasury_message(
             interaction=interaction
         )
 
-        await update_dashboard_message()
-
-        await interaction.response.send_message(
-            "Склад обновлён.",
-            ephemeral=True
+        await update_dashboard_message(
+            guild=interaction.guild
         )
 
 
@@ -1023,8 +1077,6 @@ async def send_ready_alert(
 
 
 async def updater_loop():
-    global dashboard_message
-
     await client.wait_until_ready()
 
     while not client.is_closed():
@@ -1037,7 +1089,9 @@ async def updater_loop():
                     and
                     now_utc() >= rt
                 ):
-                    message = await get_saved_dashboard_message()
+                    message = await find_timer_dashboard_message(
+                        None
+                    )
 
                     if message is None:
                         continue
@@ -1143,7 +1197,9 @@ async def on_message(message):
 
         embeds = build_embeds()
 
-        old_message = await get_saved_dashboard_message()
+        old_message = await find_timer_dashboard_message(
+            message.guild
+        )
 
         if old_message:
             try:
