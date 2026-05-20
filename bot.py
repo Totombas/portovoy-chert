@@ -115,10 +115,70 @@ def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
-def save_times(times):
+def format_gil(value):
+    return f"{value:,}".replace(",", " ")
+
+
+def default_submarine_state():
+    return {
+        "return_times": [],
+        "dashboard_message_id": None,
+        "dashboard_channel_id": None,
+    }
+
+
+def load_submarine_state():
+    if not os.path.exists(SAVE_FILE):
+        return default_submarine_state()
+
+    try:
+        with open(SAVE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            return {
+                "return_times": data,
+                "dashboard_message_id": None,
+                "dashboard_channel_id": None,
+            }
+
+        if not isinstance(data, dict):
+            return default_submarine_state()
+
+        state = default_submarine_state()
+
+        state["return_times"] = data.get("return_times", [])
+        state["dashboard_message_id"] = data.get("dashboard_message_id")
+        state["dashboard_channel_id"] = data.get("dashboard_channel_id")
+
+        return state
+
+    except:
+        return default_submarine_state()
+
+
+def save_submarine_state(
+    times=None,
+    dashboard_message_id=None,
+    dashboard_channel_id=None
+):
+    state = load_submarine_state()
+
+    if times is not None:
+        state["return_times"] = [
+            x.isoformat()
+            for x in times
+        ]
+
+    if dashboard_message_id is not None:
+        state["dashboard_message_id"] = dashboard_message_id
+
+    if dashboard_channel_id is not None:
+        state["dashboard_channel_id"] = dashboard_channel_id
+
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         json.dump(
-            [x.isoformat() for x in times],
+            state,
             f,
             ensure_ascii=False,
             indent=2
@@ -126,14 +186,25 @@ def save_times(times):
 
 
 def load_times():
-    try:
-        with open(SAVE_FILE, encoding="utf-8") as f:
-            return [
-                datetime.fromisoformat(x)
-                for x in json.load(f)
-            ]
-    except:
-        return []
+    state = load_submarine_state()
+
+    result = []
+
+    for item in state.get("return_times", []):
+        try:
+            result.append(
+                datetime.fromisoformat(item)
+            )
+        except:
+            pass
+
+    return result
+
+
+def save_times(times):
+    save_submarine_state(
+        times=times
+    )
 
 
 def default_treasury():
@@ -363,10 +434,6 @@ def build_bar(mins):
     )
 
 
-def format_gil(value):
-    return f"{value:,}".replace(",", " ")
-
-
 def get_custom_emoji(guild, emoji_name):
     if guild is None:
         return ""
@@ -552,6 +619,121 @@ def build_treasury_embed(guild):
     return embed
 
 
+def build_treasury_status_embed():
+    status_text, updated_text, color = get_treasury_status()
+
+    embed = discord.Embed(
+        title="📦 Статус склада",
+        color=color
+    )
+
+    embed.add_field(
+        name=status_text,
+        value=f"🕒 Последнее обновление: `{updated_text}`",
+        inline=False
+    )
+
+    return embed
+
+
+def build_embeds():
+    embeds = []
+
+    for i, rt in enumerate(
+        return_times,
+        1
+    ):
+        left, mins = format_remaining(rt)
+
+        embed = discord.Embed(
+            title=f"🚢 Подлодка #{i}",
+            color=get_color(mins)
+        )
+
+        embed.add_field(
+            name="Андрюха",
+            value=to_andryukha_time(rt).strftime("%H:%M"),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Валера",
+            value=to_valera_time(rt).strftime("%H:%M"),
+            inline=True
+        )
+
+        embed.add_field(
+            name="Осталось",
+            value=left,
+            inline=False
+        )
+
+        embed.add_field(
+            name="Прогресс",
+            value=build_bar(mins),
+            inline=False
+        )
+
+        embeds.append(embed)
+
+    embeds.append(
+        build_treasury_status_embed()
+    )
+
+    return embeds
+
+
+async def get_saved_dashboard_message():
+    global dashboard_message
+
+    if dashboard_message is not None:
+        return dashboard_message
+
+    state = load_submarine_state()
+
+    channel_id = state.get("dashboard_channel_id")
+    message_id = state.get("dashboard_message_id")
+
+    if not channel_id or not message_id:
+        return None
+
+    channel = client.get_channel(
+        int(channel_id)
+    )
+
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(
+                int(channel_id)
+            )
+        except:
+            return None
+
+    try:
+        dashboard_message = await channel.fetch_message(
+            int(message_id)
+        )
+        return dashboard_message
+
+    except:
+        dashboard_message = None
+        return None
+
+
+async def update_dashboard_message():
+    message = await get_saved_dashboard_message()
+
+    if message is None:
+        return
+
+    try:
+        await message.edit(
+            embeds=build_embeds()
+        )
+    except Exception as e:
+        print("Dashboard update error:", e)
+
+
 async def refresh_treasury_message(interaction=None, channel=None):
     data = load_treasury()
 
@@ -664,13 +846,7 @@ class GoldModal(ui.Modal):
             interaction=interaction
         )
 
-        if dashboard_message:
-            try:
-                await dashboard_message.edit(
-                    embeds=build_embeds()
-                )
-            except Exception as e:
-                print("Dashboard update error:", e)
+        await update_dashboard_message()
 
         await interaction.response.send_message(
             "Склад обновлён.",
@@ -744,13 +920,7 @@ class SilverModal(ui.Modal):
             interaction=interaction
         )
 
-        if dashboard_message:
-            try:
-                await dashboard_message.edit(
-                    embeds=build_embeds()
-                )
-            except Exception as e:
-                print("Dashboard update error:", e)
+        await update_dashboard_message()
 
         await interaction.response.send_message(
             "Склад обновлён.",
@@ -786,70 +956,6 @@ class TreasuryView(ui.View):
         await interaction.response.send_modal(
             SilverModal()
         )
-
-
-def build_treasury_status_embed():
-    status_text, updated_text, color = get_treasury_status()
-
-    embed = discord.Embed(
-        title="📦 Статус склада",
-        color=color
-    )
-
-    embed.add_field(
-        name=status_text,
-        value=f"🕒 Последнее обновление: `{updated_text}`",
-        inline=False
-    )
-
-    return embed
-
-
-def build_embeds():
-    embeds = []
-
-    for i, rt in enumerate(
-        return_times,
-        1
-    ):
-        left, mins = format_remaining(rt)
-
-        embed = discord.Embed(
-            title=f"🚢 Подлодка #{i}",
-            color=get_color(mins)
-        )
-
-        embed.add_field(
-            name="Андрюха",
-            value=to_andryukha_time(rt).strftime("%H:%M"),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Валера",
-            value=to_valera_time(rt).strftime("%H:%M"),
-            inline=True
-        )
-
-        embed.add_field(
-            name="Осталось",
-            value=left,
-            inline=False
-        )
-
-        embed.add_field(
-            name="Прогресс",
-            value=build_bar(mins),
-            inline=False
-        )
-
-        embeds.append(embed)
-
-    embeds.append(
-        build_treasury_status_embed()
-    )
-
-    return embeds
 
 
 async def send_ready_alert(
@@ -900,6 +1006,11 @@ async def send_ready_alert(
                 embeds=embeds
             )
 
+            save_submarine_state(
+                dashboard_message_id=dashboard_message.id,
+                dashboard_channel_id=dashboard_message.channel.id
+            )
+
         except Exception as e:
             print(e)
 
@@ -918,10 +1029,7 @@ async def updater_loop():
 
     while not client.is_closed():
         try:
-            if dashboard_message:
-                await dashboard_message.edit(
-                    embeds=build_embeds()
-                )
+            await update_dashboard_message()
 
             for i, rt in enumerate(return_times):
                 if (
@@ -929,7 +1037,12 @@ async def updater_loop():
                     and
                     now_utc() >= rt
                 ):
-                    channel = dashboard_message.channel
+                    message = await get_saved_dashboard_message()
+
+                    if message is None:
+                        continue
+
+                    channel = message.channel
 
                     asyncio.create_task(
                         send_ready_alert(
@@ -1030,14 +1143,21 @@ async def on_message(message):
 
         embeds = build_embeds()
 
-        if dashboard_message:
+        old_message = await get_saved_dashboard_message()
+
+        if old_message:
             try:
-                await dashboard_message.delete()
+                await old_message.delete()
             except:
                 pass
 
         dashboard_message = await message.channel.send(
             embeds=embeds
+        )
+
+        save_submarine_state(
+            dashboard_message_id=dashboard_message.id,
+            dashboard_channel_id=dashboard_message.channel.id
         )
 
         try:
