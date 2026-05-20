@@ -147,11 +147,7 @@ def load_submarine_state():
                 "dashboard_channel_id": None,
             }
 
-        if not isinstance(data, dict):
-            return default_submarine_state()
-
         state = default_submarine_state()
-
         state["return_times"] = data.get("return_times", [])
         state["dashboard_message_id"] = data.get("dashboard_message_id")
         state["dashboard_channel_id"] = data.get("dashboard_channel_id")
@@ -687,6 +683,61 @@ def build_embeds():
     return embeds
 
 
+async def find_existing_treasury_message(channel):
+    data = load_treasury()
+
+    message_id = data.get("message_id")
+
+    if message_id:
+        try:
+            msg = await channel.fetch_message(
+                int(message_id)
+            )
+
+            if msg:
+                return msg
+
+        except:
+            pass
+
+    found = None
+    duplicates = []
+
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author.id != client.user.id:
+                continue
+
+            if not msg.embeds:
+                continue
+
+            first_embed = msg.embeds[0]
+
+            if first_embed.title != "📦 Склад FC":
+                continue
+
+            if found is None:
+                found = msg
+            else:
+                duplicates.append(msg)
+
+    except Exception as e:
+        print("Treasury search error:", e)
+
+    for duplicate in duplicates:
+        try:
+            await duplicate.delete()
+        except:
+            pass
+
+    if found:
+        data["message_id"] = found.id
+        data["channel_id"] = found.channel.id
+        save_treasury(data)
+
+    return found
+
+
 async def find_timer_dashboard_message(guild):
     global dashboard_message
 
@@ -744,7 +795,7 @@ async def find_timer_dashboard_message(guild):
         return None
 
     try:
-        async for msg in timer_channel.history(limit=30):
+        async for msg in timer_channel.history(limit=50):
             if msg.author.id != client.user.id:
                 continue
 
@@ -774,12 +825,14 @@ async def update_dashboard_message(guild=None):
     )
 
     if message is None:
+        print("Таймер-сообщение не найдено")
         return
 
     try:
         await message.edit(
             embeds=build_embeds()
         )
+        print("Таймер-сообщение обновлено")
     except Exception as e:
         print("Dashboard update error:", e)
 
@@ -793,7 +846,7 @@ async def refresh_treasury_message(interaction=None, channel=None):
         target_channel = interaction.channel
 
     if target_channel is None:
-        return
+        return None
 
     embed = build_treasury_embed(
         target_channel.guild
@@ -801,15 +854,9 @@ async def refresh_treasury_message(interaction=None, channel=None):
 
     view = TreasuryView()
 
-    message = None
-
-    if data.get("message_id"):
-        try:
-            message = await target_channel.fetch_message(
-                int(data["message_id"])
-            )
-        except:
-            message = None
+    message = await find_existing_treasury_message(
+        target_channel
+    )
 
     if message:
         await message.edit(
@@ -886,15 +933,15 @@ class GoldModal(ui.Modal):
         except:
             await interaction.response.send_message(
                 "Нужно вводить только числа.",
-                ephemeral=True
+                ephemeral=True,
+                delete_after=10
             )
             return
 
         save_treasury(data)
 
         await interaction.response.defer(
-            ephemeral=True,
-            thinking=False
+            ephemeral=True
         )
 
         await refresh_treasury_message(
@@ -962,15 +1009,15 @@ class SilverModal(ui.Modal):
         except:
             await interaction.response.send_message(
                 "Нужно вводить только числа.",
-                ephemeral=True
+                ephemeral=True,
+                delete_after=10
             )
             return
 
         save_treasury(data)
 
         await interaction.response.defer(
-            ephemeral=True,
-            thinking=False
+            ephemeral=True
         )
 
         await refresh_treasury_message(
