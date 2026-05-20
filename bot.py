@@ -1003,7 +1003,7 @@ class TreasuryView(ui.View):
     @ui.button(
         label="Серебро",
         emoji="🥈",
-        style=discord.ButtonStyle.secondary,
+        style=discord.ButtonStyle.primary,
         custom_id="treasury_silver"
     )
     async def silver_button(self, interaction, button):
