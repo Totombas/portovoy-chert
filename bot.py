@@ -394,7 +394,7 @@ def item_total(data, item_id):
     return count * price
 
 
-def item_line(guild, data, item_id):
+def item_block(guild, data, item_id):
     item = ITEMS[item_id]
 
     emoji = get_custom_emoji(
@@ -412,9 +412,8 @@ def item_line(guild, data, item_id):
     )
 
     return (
-        f"{emoji} **{item['title']}** — "
-        f"**{count}** шт. • "
-        f"**{format_gil(total)}**"
+        f"{emoji} **{count}**\n"
+        f"> {item['title']} • **{format_gil(total)}**"
     )
 
 
@@ -431,24 +430,6 @@ def group_total(data, group):
         )
 
     return total
-
-
-def get_treasury_age_hours():
-    data = load_treasury()
-
-    updated_at = data.get("updated_at")
-
-    if not updated_at:
-        return None
-
-    try:
-        updated_dt = datetime.fromisoformat(updated_at)
-    except:
-        return None
-
-    delta = now_utc() - updated_dt
-
-    return delta.total_seconds() / 3600
 
 
 def get_treasury_status():
@@ -503,12 +484,12 @@ def get_treasury_status():
 def build_treasury_embed(guild):
     data = load_treasury()
 
-    gold_lines = []
-    silver_lines = []
+    gold_blocks = []
+    silver_blocks = []
 
     for kind in ITEM_ORDER:
-        gold_lines.append(
-            item_line(
+        gold_blocks.append(
+            item_block(
                 guild,
                 data,
                 f"gold_{kind}"
@@ -516,8 +497,8 @@ def build_treasury_embed(guild):
         )
 
     for kind in ITEM_ORDER:
-        silver_lines.append(
-            item_line(
+        silver_blocks.append(
+            item_block(
                 guild,
                 data,
                 f"silver_{kind}"
@@ -539,8 +520,9 @@ def build_treasury_embed(guild):
     embed.add_field(
         name="🏅 Золото",
         value=(
-            "\n".join(gold_lines) +
-            f"\n\n**Итого золото:** `{format_gil(gold_total)}`"
+            "\n\n".join(gold_blocks) +
+            f"\n\n💰 **Итого золото**\n"
+            f"**{format_gil(gold_total)}**"
         ),
         inline=False
     )
@@ -548,14 +530,15 @@ def build_treasury_embed(guild):
     embed.add_field(
         name="🥈 Серебро",
         value=(
-            "\n".join(silver_lines) +
-            f"\n\n**Итого серебро:** `{format_gil(silver_total)}`"
+            "\n\n".join(silver_blocks) +
+            f"\n\n💰 **Итого серебро**\n"
+            f"**{format_gil(silver_total)}**"
         ),
         inline=False
     )
 
     embed.add_field(
-        name="💰 Общая сумма",
+        name="💎 Общая сумма",
         value=f"**{format_gil(total)} gil**",
         inline=False
     )
@@ -615,35 +598,48 @@ async def refresh_treasury_message(interaction=None, channel=None):
     return message
 
 
-class GoldModal(ui.Modal, title="🏅 Обновить золото"):
+class GoldModal(ui.Modal):
 
-    necklace = ui.TextInput(
-        label="Ожерелье",
-        placeholder="Например: 43",
-        required=True,
-        max_length=4
-    )
+    def __init__(self):
+        super().__init__(
+            title="🏅 Обновить золото"
+        )
 
-    earring = ui.TextInput(
-        label="Серьга",
-        placeholder="Например: 47",
-        required=True,
-        max_length=4
-    )
+        data = load_treasury()
+        inventory = data["inventory"]
 
-    bracelet = ui.TextInput(
-        label="Браслет",
-        placeholder="Например: 13",
-        required=True,
-        max_length=4
-    )
+        self.necklace = ui.TextInput(
+            label="Ожерелье",
+            default=str(inventory.get("gold_necklace", 0)),
+            required=True,
+            max_length=4
+        )
 
-    ring = ui.TextInput(
-        label="Кольцо",
-        placeholder="Например: 29",
-        required=True,
-        max_length=4
-    )
+        self.earring = ui.TextInput(
+            label="Серьга",
+            default=str(inventory.get("gold_earring", 0)),
+            required=True,
+            max_length=4
+        )
+
+        self.bracelet = ui.TextInput(
+            label="Браслет",
+            default=str(inventory.get("gold_bracelet", 0)),
+            required=True,
+            max_length=4
+        )
+
+        self.ring = ui.TextInput(
+            label="Кольцо",
+            default=str(inventory.get("gold_ring", 0)),
+            required=True,
+            max_length=4
+        )
+
+        self.add_item(self.necklace)
+        self.add_item(self.earring)
+        self.add_item(self.bracelet)
+        self.add_item(self.ring)
 
     async def on_submit(self, interaction):
         data = load_treasury()
@@ -658,8 +654,7 @@ class GoldModal(ui.Modal, title="🏅 Обновить золото"):
         except:
             await interaction.response.send_message(
                 "Нужно вводить только числа.",
-                ephemeral=True,
-                delete_after=10
+                ephemeral=True
             )
             return
 
@@ -679,40 +674,52 @@ class GoldModal(ui.Modal, title="🏅 Обновить золото"):
 
         await interaction.response.send_message(
             "Склад обновлён.",
-            ephemeral=True,
-            delete_after=10
+            ephemeral=True
         )
 
 
-class SilverModal(ui.Modal, title="🥈 Обновить серебро"):
+class SilverModal(ui.Modal):
 
-    necklace = ui.TextInput(
-        label="Ожерелье",
-        placeholder="Например: 85",
-        required=True,
-        max_length=4
-    )
+    def __init__(self):
+        super().__init__(
+            title="🥈 Обновить серебро"
+        )
 
-    earring = ui.TextInput(
-        label="Серьга",
-        placeholder="Например: 57",
-        required=True,
-        max_length=4
-    )
+        data = load_treasury()
+        inventory = data["inventory"]
 
-    bracelet = ui.TextInput(
-        label="Браслет",
-        placeholder="Например: 30",
-        required=True,
-        max_length=4
-    )
+        self.necklace = ui.TextInput(
+            label="Ожерелье",
+            default=str(inventory.get("silver_necklace", 0)),
+            required=True,
+            max_length=4
+        )
 
-    ring = ui.TextInput(
-        label="Кольцо",
-        placeholder="Например: 40",
-        required=True,
-        max_length=4
-    )
+        self.earring = ui.TextInput(
+            label="Серьга",
+            default=str(inventory.get("silver_earring", 0)),
+            required=True,
+            max_length=4
+        )
+
+        self.bracelet = ui.TextInput(
+            label="Браслет",
+            default=str(inventory.get("silver_bracelet", 0)),
+            required=True,
+            max_length=4
+        )
+
+        self.ring = ui.TextInput(
+            label="Кольцо",
+            default=str(inventory.get("silver_ring", 0)),
+            required=True,
+            max_length=4
+        )
+
+        self.add_item(self.necklace)
+        self.add_item(self.earring)
+        self.add_item(self.bracelet)
+        self.add_item(self.ring)
 
     async def on_submit(self, interaction):
         data = load_treasury()
@@ -727,8 +734,7 @@ class SilverModal(ui.Modal, title="🥈 Обновить серебро"):
         except:
             await interaction.response.send_message(
                 "Нужно вводить только числа.",
-                ephemeral=True,
-                delete_after=10
+                ephemeral=True
             )
             return
 
@@ -748,8 +754,7 @@ class SilverModal(ui.Modal, title="🥈 Обновить серебро"):
 
         await interaction.response.send_message(
             "Склад обновлён.",
-            ephemeral=True,
-            delete_after=10
+            ephemeral=True
         )
 
 
