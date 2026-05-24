@@ -1130,6 +1130,31 @@ async def updater_loop():
         try:
             await update_dashboard_message()
 
+            try:
+                treasury_data = load_treasury()
+                treasury_channel_id = treasury_data.get("channel_id")
+
+                if treasury_channel_id:
+                    treasury_channel = client.get_channel(
+                        int(treasury_channel_id)
+                    )
+
+                    if treasury_channel is None:
+                        try:
+                            treasury_channel = await client.fetch_channel(
+                                int(treasury_channel_id)
+                            )
+                        except:
+                            treasury_channel = None
+
+                    if treasury_channel is not None:
+                        await refresh_treasury_message(
+                            channel=treasury_channel
+                        )
+
+            except Exception as e:
+                print("Treasury auto-refresh error:", e)
+
             for i, rt in enumerate(return_times):
                 if (
                     not ready_sent[i]
