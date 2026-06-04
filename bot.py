@@ -127,6 +127,7 @@ def format_gil(value):
 def default_submarine_state():
     return {
         "return_times": [],
+        "ready_notified_return_times": [],
         "dashboard_message_id": None,
         "dashboard_channel_id": None,
     }
@@ -149,6 +150,10 @@ def load_submarine_state():
 
         state = default_submarine_state()
         state["return_times"] = data.get("return_times", [])
+        state["ready_notified_return_times"] = data.get(
+            "ready_notified_return_times",
+            []
+        )
         state["dashboard_message_id"] = data.get("dashboard_message_id")
         state["dashboard_channel_id"] = data.get("dashboard_channel_id")
 
@@ -160,6 +165,7 @@ def load_submarine_state():
 
 def save_submarine_state(
     times=None,
+    ready_sent_flags=None,
     dashboard_message_id=None,
     dashboard_channel_id=None
 ):
@@ -169,6 +175,18 @@ def save_submarine_state(
         state["return_times"] = [
             x.isoformat()
             for x in times
+        ]
+
+    if ready_sent_flags is not None:
+        current_times = times
+
+        if current_times is None:
+            current_times = load_times()
+
+        state["ready_notified_return_times"] = [
+            current_times[i].isoformat()
+            for i, is_sent in enumerate(ready_sent_flags)
+            if is_sent and i < len(current_times)
         ]
 
     if dashboard_message_id is not None:
@@ -202,9 +220,33 @@ def load_times():
     return result
 
 
-def save_times(times):
+def load_ready_sent(times):
+    state = load_submarine_state()
+
+    notified = set(
+        state.get(
+            "ready_notified_return_times",
+            []
+        )
+    )
+
+    return [
+        rt.isoformat() in notified
+        for rt in times
+    ]
+
+
+def save_times(times, ready_sent_flags=None):
     save_submarine_state(
-        times=times
+        times=times,
+        ready_sent_flags=ready_sent_flags
+    )
+
+
+def save_ready_sent(times, ready_sent_flags):
+    save_submarine_state(
+        times=times,
+        ready_sent_flags=ready_sent_flags
     )
 
 
@@ -1180,6 +1222,11 @@ async def updater_loop():
 
                     ready_sent[i] = True
 
+                    save_ready_sent(
+                        return_times,
+                        ready_sent
+                    )
+
         except Exception as e:
             print("Loop error:", e)
 
@@ -1203,8 +1250,8 @@ async def on_ready():
 
     return_times = load_times()
 
-    ready_sent = (
-        [False] * len(return_times)
+    ready_sent = load_ready_sent(
+        return_times
     )
 
     print("Bot ready")
@@ -1265,7 +1312,10 @@ async def on_message(message):
             [False] * len(return_times)
         )
 
-        save_times(return_times)
+        save_times(
+            return_times,
+            ready_sent
+        )
 
         embeds = build_embeds()
 
