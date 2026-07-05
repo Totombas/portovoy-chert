@@ -762,10 +762,10 @@ def build_fc_field(state, fc_key):
 
         lines.append(
             f"**{idx}. {sub['name']}**\n"
-            f"{dot} **{left}** • **{and_time} / {val_time}**"
+            f"{dot} **{left}** • **{and_time} / {val_time}**\n\u200b"
         )
 
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 
 def build_dashboard_embed(guild=None):
@@ -812,7 +812,7 @@ def build_dashboard_embed(guild=None):
         embed.add_field(
             name=title,
             value=build_fc_field(state, fc_key),
-            inline=True,
+            inline=False,
         )
 
     return embed
