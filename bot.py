@@ -746,7 +746,7 @@ def build_fc_field(state, fc_key):
         if rt is None:
             lines.append(
                 f"**{idx}. {sub['name']}**\n"
-                f"{dot} —"
+                f"{dot} **—**"
             )
             continue
 
@@ -762,7 +762,7 @@ def build_fc_field(state, fc_key):
 
         lines.append(
             f"**{idx}. {sub['name']}**\n"
-            f"{dot} **{left}** • {and_time} / {val_time}"
+            f"{dot} **{left}** · **{and_time} / {val_time}**"
         )
 
     return "\n".join(lines)
@@ -776,10 +776,8 @@ def build_dashboard_embed(guild=None):
     total = treasury_total()
 
     embed = discord.Embed(
-        title="⚓ SUBMARINE COMMAND CENTER",
-        description=(
-            f"Обновлено: `{to_andryukha_time(now_utc()).strftime('%d.%m • %H:%M')}`"
-        ),
+        title="⚓ ЛОДОЧКИ",
+        description=f"Обновлено: `{to_andryukha_time(now_utc()).strftime('%d.%m • %H:%M')}`",
         color=dashboard_color(state),
     )
 
@@ -799,7 +797,6 @@ def build_dashboard_embed(guild=None):
         inline=True,
     )
 
-    # Пустое поле, чтобы верхние блоки легли аккуратнее в 3 колонки Discord.
     embed.add_field(
         name="\u200b",
         value="\u200b",
@@ -813,16 +810,8 @@ def build_dashboard_embed(guild=None):
         embed.add_field(
             name=title,
             value=build_fc_field(state, fc_key),
-            inline=True
+            inline=True,
         )
-
-    embed.set_footer(
-        text=(
-            "🟢 готово • 🔵 0–6ч • 🟡 6–12ч • "
-            "🟠 12–24ч • 🔴 >24ч | "
-            "Андрюха UTC+5 • Валера UTC+7"
-        )
-    )
 
     return embed
 
@@ -893,7 +882,10 @@ async def find_timer_dashboard_message(guild=None):
 
             if (
                 msg.embeds[0].title and
-                "SUBMARINE COMMAND CENTER" in msg.embeds[0].title
+                (
+                    "SUBMARINE COMMAND CENTER" in msg.embeds[0].title or
+                    "ЛОДОЧКИ" in msg.embeds[0].title
+                )
             ):
                 dashboard_message = msg
 
@@ -916,6 +908,12 @@ async def refresh_dashboard(channel=None, guild=None):
     message = await find_timer_dashboard_message(
         guild
     )
+
+    if guild is None:
+        if message is not None:
+            guild = message.guild
+        elif channel is not None:
+            guild = channel.guild
 
     embed = build_dashboard_embed(
         guild
@@ -1059,11 +1057,6 @@ class FleetSelectView(ui.View):
         fc_keys = list(FC_CONFIG)
 
         for fc_key, cfg in FC_CONFIG.items():
-            active = get_fc_active_count(
-                state,
-                fc_key
-            )
-
             row = (
                 0
                 if fc_keys.index(fc_key) < 4
@@ -1076,7 +1069,7 @@ class FleetSelectView(ui.View):
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"fleet_select:{fc_key}",
                 row=row,
-                disabled=active <= 0,
+                disabled=False,
             )
 
             button.callback = self.make_select_callback(
@@ -1450,14 +1443,21 @@ async def handle_scan_image(message, fc_key):
         fc_key
     )
 
-    if active <= 0:
-        return False
-
     try:
         img_bytes = await attachment.read()
         new_times = parse_image(
             img_bytes
         )
+
+        if not new_times:
+            await message.add_reaction(
+                "❌"
+            )
+            return True
+
+        if active <= 0:
+            active = min(4, len(new_times))
+            state["fcs"][fc_key]["active_subs"] = active
 
         if len(new_times) < active:
             await message.add_reaction(
