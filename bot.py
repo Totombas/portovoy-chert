@@ -761,7 +761,7 @@ def build_fc_field(state, fc_key):
         val_time = to_valera_time(rt).strftime("%H:%M")
 
         lines.append(
-            f"**{idx}. {sub['name']}**\n"
+            f"**{idx}. {sub['name']}**"
             f"{dot} **{left}** • **{and_time} / {val_time}**\n⠀"
         )
 
