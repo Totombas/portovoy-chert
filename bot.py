@@ -746,7 +746,7 @@ def build_fc_field(state, fc_key):
         if rt is None:
             lines.append(
                 f"**{idx}. {sub['name']}**\n"
-                f"{dot} **—**"
+                f"{dot} —"
             )
             continue
 
@@ -762,10 +762,10 @@ def build_fc_field(state, fc_key):
 
         lines.append(
             f"**{idx}. {sub['name']}**\n"
-            f"{dot} **{left}** · **{and_time} / {val_time}**"
+            f"{dot} **{left}** • **{and_time} / {val_time}**"
         )
 
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def build_dashboard_embed(guild=None):
@@ -776,8 +776,10 @@ def build_dashboard_embed(guild=None):
     total = treasury_total()
 
     embed = discord.Embed(
-        title="⚓ ЛОДОЧКИ",
-        description=f"Обновлено: `{to_andryukha_time(now_utc()).strftime('%d.%m • %H:%M')}`",
+        title="🚢 ЛОДОЧКИ",
+        description=(
+            f"Обновлено: `{to_andryukha_time(now_utc()).strftime('%d.%m • %H:%M')}`"
+        ),
         color=dashboard_color(state),
     )
 
@@ -798,14 +800,14 @@ def build_dashboard_embed(guild=None):
     )
 
     embed.add_field(
-        name="\u200b",
-        value="\u200b",
+        name="​",
+        value="​",
         inline=True,
     )
 
     for fc_key, cfg in FC_CONFIG.items():
         fc_emoji = get_fc_emoji(guild, fc_key)
-        title = f"{fc_emoji} {cfg['title']}"
+        title = f"━━ {fc_emoji} {cfg['title']}"
 
         embed.add_field(
             name=title,
@@ -905,9 +907,7 @@ async def find_timer_dashboard_message(guild=None):
 async def refresh_dashboard(channel=None, guild=None):
     global dashboard_message
 
-    message = await find_timer_dashboard_message(
-        guild
-    )
+    message = await find_timer_dashboard_message(guild)
 
     if guild is None:
         if message is not None:
@@ -915,19 +915,14 @@ async def refresh_dashboard(channel=None, guild=None):
         elif channel is not None:
             guild = channel.guild
 
-    embed = build_dashboard_embed(
-        guild
-    )
-
-    view = FleetSelectView(
-        guild=guild
-    )
+    embed = build_dashboard_embed(guild)
+    view = FleetSelectView(guild=guild)
 
     if message is not None:
         try:
             await message.edit(
                 embed=embed,
-                view=view
+                view=view,
             )
             return message
 
@@ -938,9 +933,14 @@ async def refresh_dashboard(channel=None, guild=None):
     if channel is None:
         return None
 
+    if guild is None:
+        guild = channel.guild
+        embed = build_dashboard_embed(guild)
+        view = FleetSelectView(guild=guild)
+
     dashboard_message = await channel.send(
         embed=embed,
-        view=view
+        view=view,
     )
 
     state = load_fleet_state()
@@ -1057,6 +1057,11 @@ class FleetSelectView(ui.View):
         fc_keys = list(FC_CONFIG)
 
         for fc_key, cfg in FC_CONFIG.items():
+            active = get_fc_active_count(
+                state,
+                fc_key
+            )
+
             row = (
                 0
                 if fc_keys.index(fc_key) < 4
@@ -1342,7 +1347,14 @@ async def updater_loop():
 
     while not client.is_closed():
         try:
-            await refresh_dashboard()
+            message = await find_timer_dashboard_message(None)
+            if message is not None:
+                await refresh_dashboard(
+                    channel=message.channel,
+                    guild=message.guild,
+                )
+            else:
+                await refresh_dashboard()
 
             state = load_fleet_state()
             message = await find_timer_dashboard_message(None)
@@ -1455,6 +1467,7 @@ async def handle_scan_image(message, fc_key):
             )
             return True
 
+        # Если в FC пока 0 лодок, первый нормальный скрин сам открывает слоты.
         if active <= 0:
             active = min(4, len(new_times))
             state["fcs"][fc_key]["active_subs"] = active
