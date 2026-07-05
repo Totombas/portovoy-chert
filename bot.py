@@ -765,7 +765,7 @@ def build_fc_field(state, fc_key):
             f"{dot} **{left}** • **{and_time} / {val_time}**"
         )
 
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 
 def build_dashboard_embed(guild=None):
@@ -807,7 +807,7 @@ def build_dashboard_embed(guild=None):
 
     for fc_key, cfg in FC_CONFIG.items():
         fc_emoji = get_fc_emoji(guild, fc_key)
-        title = f"━━ {fc_emoji} {cfg['title']}"
+        title = f"━━━━ {fc_emoji} {cfg['title']}"
 
         embed.add_field(
             name=title,
