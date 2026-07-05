@@ -262,7 +262,7 @@ def get_fc_emoji(guild, fc_key):
 
 def default_fleet_state():
     return {
-        "state_version": 2,
+        "state_version": 3,
         "dashboard_message_id": None,
         "dashboard_channel_id": None,
         "fcs": {
@@ -323,9 +323,9 @@ def normalize_fleet_state(data):
         active = safe_int(old_fc.get("active_subs", cfg["active_subs"]), cfg["active_subs"])
         active = max(0, min(4, active))
 
-        # Старый тестовый файл создавал Leviathan/Titan с 1 активной лодкой.
-        # Если это старое состояние и таймеров там нет, считаем, что лодок пока нет.
-        if old_version < 2 and fc_key != "eva" and not any_timer:
+        # Старые тестовые файлы могли создать Leviathan/Titan с активной лодкой.
+        # При апгрейде до версии 3 сбрасываем пустые не-E.V.A. FC к дефолту.
+        if old_version < 3 and fc_key != "eva" and not any_timer:
             active = cfg["active_subs"]
 
         state["fcs"][fc_key]["active_subs"] = active
@@ -354,7 +354,7 @@ def load_fleet_state():
 
 def save_fleet_state(state):
     ensure_data_dir()
-    state["state_version"] = 2
+    state["state_version"] = 3
 
     with open(FLEET_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -809,9 +809,6 @@ def build_dashboard_embed(guild=None):
     for fc_key, cfg in FC_CONFIG.items():
         fc_emoji = get_fc_emoji(guild, fc_key)
         title = f"{fc_emoji} {cfg['title']}"
-
-        if fc_key == "eva":
-            title += " (Основная)"
 
         embed.add_field(
             name=title,
