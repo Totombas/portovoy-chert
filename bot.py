@@ -273,6 +273,8 @@ def default_fleet_state():
                         "name": sub_name,
                         "return_time": None,
                         "ready_notified": False,
+                        "alert_message_id": None,
+                        "alert_channel_id": None,
                     }
                     for sub_name in cfg["subs"]
                 ],
@@ -315,6 +317,12 @@ def normalize_fleet_state(data):
                 state["fcs"][fc_key]["subs"][i]["return_time"] = return_time
                 state["fcs"][fc_key]["subs"][i]["ready_notified"] = bool(
                     old_sub.get("ready_notified", False)
+                )
+                state["fcs"][fc_key]["subs"][i]["alert_message_id"] = old_sub.get(
+                    "alert_message_id"
+                )
+                state["fcs"][fc_key]["subs"][i]["alert_channel_id"] = old_sub.get(
+                    "alert_channel_id"
                 )
 
                 if return_time:
@@ -752,8 +760,8 @@ def build_fc_field(state, fc_key):
 
         if mins == 0:
             lines.append(
-                f"**{idx}. {sub['name']}**\n"
-                f"🟢 **ГОТОВО**"
+                f"**{idx}. {sub['name']}**"
+                f"🟢 **ГОТОВО**\n"
             )
             continue
 
@@ -904,7 +912,7 @@ async def find_timer_dashboard_message(guild=None):
     return None
 
 
-async def refresh_dashboard(channel=None, guild=None):
+async def refresh_dashboard(channel=None, guild=None, move_to_bottom=False):
     global dashboard_message
 
     message = await find_timer_dashboard_message(guild)
@@ -918,7 +926,7 @@ async def refresh_dashboard(channel=None, guild=None):
     embed = build_dashboard_embed(guild)
     view = FleetSelectView(guild=guild)
 
-    if message is not None:
+    if message is not None and not move_to_bottom:
         try:
             await message.edit(
                 embed=embed,
@@ -929,6 +937,17 @@ async def refresh_dashboard(channel=None, guild=None):
         except Exception as e:
             print("Dashboard update error:", e)
             dashboard_message = None
+
+    if message is not None and move_to_bottom:
+        if channel is None:
+            channel = message.channel
+
+        try:
+            await message.delete()
+        except Exception as e:
+            print("Dashboard move delete error:", e)
+
+        dashboard_message = None
 
     if channel is None:
         return None
@@ -1291,6 +1310,40 @@ class TreasuryView(ui.View):
         )
 
 
+async def delete_ready_alert(channel, sub):
+    alert_message_id = sub.get("alert_message_id")
+
+    if not alert_message_id:
+        return
+
+    alert_channel = channel
+    alert_channel_id = sub.get("alert_channel_id")
+
+    if alert_channel_id:
+        alert_channel = client.get_channel(
+            int(alert_channel_id)
+        )
+
+        if alert_channel is None:
+            try:
+                alert_channel = await client.fetch_channel(
+                    int(alert_channel_id)
+                )
+            except Exception:
+                alert_channel = channel
+
+    try:
+        old_msg = await alert_channel.fetch_message(
+            int(alert_message_id)
+        )
+        await old_msg.delete()
+    except Exception:
+        pass
+
+    sub["alert_message_id"] = None
+    sub["alert_channel_id"] = None
+
+
 async def send_ready_alert(channel, fc_key, sub_index, sub_name, rt):
     cfg = FC_CONFIG[fc_key]
     emoji = get_fc_emoji(
@@ -1329,17 +1382,17 @@ async def send_ready_alert(channel, fc_key, sub_index, sub_name, rt):
         embed=embed
     )
 
+    state = load_fleet_state()
+    sub = state["fcs"][fc_key]["subs"][sub_index - 1]
+    sub["alert_message_id"] = msg.id
+    sub["alert_channel_id"] = msg.channel.id
+    save_fleet_state(state)
+
     await refresh_dashboard(
         channel=channel,
-        guild=channel.guild
+        guild=channel.guild,
+        move_to_bottom=True,
     )
-
-    await asyncio.sleep(86400)
-
-    try:
-        await msg.delete()
-    except Exception:
-        pass
 
 
 async def updater_loop():
@@ -1483,6 +1536,10 @@ async def handle_scan_image(message, fc_key):
         for idx, rt in enumerate(
             new_times[:active]
         ):
+            await delete_ready_alert(
+                message.channel,
+                fc["subs"][idx]
+            )
             fc["subs"][idx]["return_time"] = rt.isoformat()
             fc["subs"][idx]["ready_notified"] = False
 
@@ -1490,7 +1547,8 @@ async def handle_scan_image(message, fc_key):
 
         await refresh_dashboard(
             channel=message.channel,
-            guild=message.guild
+            guild=message.guild,
+            move_to_bottom=True,
         )
 
         try:
