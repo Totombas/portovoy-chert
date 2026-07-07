@@ -759,7 +759,7 @@ def build_fc_field(state, fc_key):
 
         if rt is None:
             lines.append(
-                f"**{idx}. {sub['name']}**\n"
+                f"**{idx}. {sub['name']}**"
                 f"{dot} —"
             )
             continue
@@ -778,7 +778,7 @@ def build_fc_field(state, fc_key):
         val_time = f"{weekday_ru(val_dt)} {val_dt:%H:%M}"
 
         lines.append(
-            f"**{idx}. {sub['name']}**\n"
+            f"**{idx}. {sub['name']}**"
             f"{dot} **{left}**\n"
             f"🕒 **{and_time} / {val_time}**"
         )
