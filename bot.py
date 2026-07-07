@@ -204,6 +204,15 @@ ITEMS = {
 
 ITEM_ORDER = ["necklace", "earring", "bracelet", "ring"]
 
+WEEKDAYS_RU = [
+    "Пн", "Вт", "Ср",
+    "Чт", "Пт", "Сб", "Вс",
+]
+
+
+def weekday_ru(dt):
+    return WEEKDAYS_RU[dt.weekday()]
+
 
 def now_utc():
     return datetime.utcnow()
@@ -765,8 +774,11 @@ def build_fc_field(state, fc_key):
             )
             continue
 
-        and_time = to_andryukha_time(rt).strftime("%H:%M")
-        val_time = to_valera_time(rt).strftime("%H:%M")
+        and_dt = to_andryukha_time(rt)
+        val_dt = to_valera_time(rt)
+
+        and_time = f"{weekday_ru(and_dt)} {and_dt:%H:%M}"
+        val_time = f"{weekday_ru(val_dt)} {val_dt:%H:%M}"
 
         lines.append(
             f"**{idx}. {sub['name']}**\n"
@@ -774,7 +786,7 @@ def build_fc_field(state, fc_key):
             f"🕒 **{and_time} / {val_time}**"
         )
 
-    return "\n\n".join(lines)
+    return "\n".join(lines)
 
 
 def build_dashboard_embed(guild=None):
