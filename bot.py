@@ -204,10 +204,7 @@ ITEMS = {
 
 ITEM_ORDER = ["necklace", "earring", "bracelet", "ring"]
 
-WEEKDAYS_RU = [
-    "Пн", "Вт", "Ср",
-    "Чт", "Пт", "Сб", "Вс",
-]
+WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
 def weekday_ru(dt):
@@ -786,7 +783,7 @@ def build_fc_field(state, fc_key):
             f"🕒 **{and_time} / {val_time}**"
         )
 
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def build_dashboard_embed(guild=None):
