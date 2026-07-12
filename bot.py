@@ -43,6 +43,8 @@ client = discord.Client(intents=intents)
 # user_id -> {"fc_key": str, "expires_at": datetime}
 pending_scans = {}
 dashboard_message = None
+dashboard_lock = asyncio.Lock()
+updater_task = None
 
 
 FC_CONFIG = {
@@ -923,6 +925,18 @@ async def find_timer_dashboard_message(guild=None):
 
 
 async def refresh_dashboard(channel=None, guild=None, move_to_bottom=False):
+    # Любые операции с инфодоской выполняются строго по одной.
+    # Это не дает updater_loop, обработке скрина и уведомлению о готовности
+    # одновременно удалить/создать несколько одинаковых сообщений.
+    async with dashboard_lock:
+        return await _refresh_dashboard_locked(
+            channel=channel,
+            guild=guild,
+            move_to_bottom=move_to_bottom,
+        )
+
+
+async def _refresh_dashboard_locked(channel=None, guild=None, move_to_bottom=False):
     global dashboard_message
 
     message = await find_timer_dashboard_message(guild)
@@ -954,10 +968,22 @@ async def refresh_dashboard(channel=None, guild=None, move_to_bottom=False):
 
         try:
             await message.delete()
+            dashboard_message = None
         except Exception as e:
             print("Dashboard move delete error:", e)
 
-        dashboard_message = None
+            # Если старое сообщение удалить не удалось, нельзя создавать новое —
+            # иначе в чате останутся две инфодоски. Просто обновляем старую.
+            try:
+                await message.edit(
+                    embed=embed,
+                    view=view,
+                )
+                dashboard_message = message
+                return message
+            except Exception as edit_error:
+                print("Dashboard fallback edit error:", edit_error)
+                dashboard_message = None
 
     if channel is None:
         return None
@@ -1582,6 +1608,8 @@ async def handle_scan_image(message, fc_key):
 
 @client.event
 async def on_ready():
+    global updater_task
+
     print(f"Logged as {client.user}")
 
     client.add_view(
@@ -1594,9 +1622,12 @@ async def on_ready():
 
     print("Bot ready")
 
-    client.loop.create_task(
-        updater_loop()
-    )
+    # on_ready может вызываться повторно после переподключения Discord.
+    # Не запускаем второй updater_loop поверх уже работающего.
+    if updater_task is None or updater_task.done():
+        updater_task = asyncio.create_task(
+            updater_loop()
+        )
 
 
 @client.event
