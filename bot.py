@@ -1556,12 +1556,17 @@ async def handle_scan_image(message, fc_key):
             )
             return True
 
-        # Если в FC пока 0 лодок, первый нормальный скрин сам открывает слоты.
-        if active <= 0:
-            active = min(4, len(new_times))
+        # Количество лодок определяется по успешно распознанным таймерам.
+        # Если на скрине появилось больше лодок, автоматически открываем новые слоты.
+        # Если OCR увидел меньше, чем уже было записано, считаем скрин неполным
+        # и не уменьшаем количество активных лодок автоматически.
+        found = min(4, len(new_times))
+
+        if found > active:
+            active = found
             state["fcs"][fc_key]["active_subs"] = active
 
-        if len(new_times) < active:
+        if found < active:
             await message.add_reaction(
                 "❌"
             )
