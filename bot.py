@@ -838,90 +838,109 @@ def build_dashboard_embed(guild=None):
     return embed
 
 
-async def find_timer_dashboard_message(guild=None):
+async def find_timer_dashboard_message(guild=None, cleanup_duplicates=True):
     global dashboard_message
 
-    if dashboard_message is not None:
-        return dashboard_message
-
     state = load_fleet_state()
+
+    # Сначала пробуем сообщение, которое уже лежит в памяти.
+    # Но дополнительно проверяем, что оно реально существует.
+    if dashboard_message is not None:
+        try:
+            dashboard_message = await dashboard_message.channel.fetch_message(
+                int(dashboard_message.id)
+            )
+        except Exception:
+            dashboard_message = None
+
+    channel = None
 
     channel_id = state.get("dashboard_channel_id")
     message_id = state.get("dashboard_message_id")
 
-    if channel_id and message_id:
-        channel = client.get_channel(
-            int(channel_id)
-        )
+    if channel_id:
+        channel = client.get_channel(int(channel_id))
 
         if channel is None:
             try:
-                channel = await client.fetch_channel(
-                    int(channel_id)
-                )
+                channel = await client.fetch_channel(int(channel_id))
             except Exception:
                 channel = None
 
-        if channel is not None:
-            try:
-                dashboard_message = await channel.fetch_message(
-                    int(message_id)
-                )
-                return dashboard_message
-            except Exception:
-                dashboard_message = None
+    # Если сохраненный ID сообщения валиден — используем его.
+    if dashboard_message is None and channel is not None and message_id:
+        try:
+            dashboard_message = await channel.fetch_message(int(message_id))
+        except Exception:
+            dashboard_message = None
 
-    if guild is None:
-        return None
+    # Если guild не передан, но канал известен, можем все равно почистить дубли.
+    timer_channel = channel
 
-    timer_channel = None
+    if timer_channel is None and guild is not None:
+        for candidate in guild.text_channels:
+            clean_name = candidate.name.lower()
 
-    for channel in guild.text_channels:
-        clean_name = channel.name.lower()
-
-        if clean_name in TIMER_CHANNEL_NAMES:
-            timer_channel = channel
-            break
-
-    if timer_channel is None:
-        for channel in guild.text_channels:
-            clean_name = channel.name.lower()
-
-            if "таймер" in clean_name or "timer" in clean_name:
-                timer_channel = channel
+            if clean_name in TIMER_CHANNEL_NAMES:
+                timer_channel = candidate
                 break
 
+        if timer_channel is None:
+            for candidate in guild.text_channels:
+                clean_name = candidate.name.lower()
+
+                if "таймер" in clean_name or "timer" in clean_name:
+                    timer_channel = candidate
+                    break
+
     if timer_channel is None:
-        return None
+        return dashboard_message
+
+    found = []
 
     try:
-        async for msg in timer_channel.history(limit=50):
+        async for msg in timer_channel.history(limit=100):
             if msg.author.id != client.user.id:
                 continue
 
             if not msg.embeds:
                 continue
 
+            title = msg.embeds[0].title or ""
+
             if (
-                msg.embeds[0].title and
-                (
-                    "SUBMARINE COMMAND CENTER" in msg.embeds[0].title or
-                    "ЛОДОЧКИ" in msg.embeds[0].title
-                )
+                "SUBMARINE COMMAND CENTER" in title or
+                "ЛОДОЧКИ" in title
             ):
-                dashboard_message = msg
-
-                state["dashboard_message_id"] = msg.id
-                state["dashboard_channel_id"] = msg.channel.id
-
-                save_fleet_state(state)
-
-                return dashboard_message
+                found.append(msg)
 
     except Exception as e:
         print("Dashboard search error:", e)
+        return dashboard_message
 
-    return None
+    if not found:
+        dashboard_message = None
+        return None
+
+    # Discord history идет от новых к старым. Оставляем самую свежую доску.
+    found.sort(key=lambda msg: msg.created_at, reverse=True)
+    newest = found[0]
+
+    if cleanup_duplicates:
+        for duplicate in found[1:]:
+            try:
+                await duplicate.delete()
+                print(f"Deleted duplicate dashboard: {duplicate.id}")
+            except Exception as e:
+                print(f"Duplicate dashboard delete error {duplicate.id}:", e)
+
+    dashboard_message = newest
+
+    state["dashboard_message_id"] = newest.id
+    state["dashboard_channel_id"] = newest.channel.id
+    save_fleet_state(state)
+
+    return dashboard_message
 
 
 async def refresh_dashboard(channel=None, guild=None, move_to_bottom=False):
@@ -992,6 +1011,25 @@ async def _refresh_dashboard_locked(channel=None, guild=None, move_to_bottom=Fal
         guild = channel.guild
         embed = build_dashboard_embed(guild)
         view = FleetSelectView(guild=guild)
+
+    # Последняя проверка прямо перед созданием нового сообщения.
+    # Если другая корутина уже успела создать доску, просто обновляем ее.
+    existing = await find_timer_dashboard_message(
+        guild,
+        cleanup_duplicates=True,
+    )
+
+    if existing is not None:
+        try:
+            await existing.edit(
+                embed=embed,
+                view=view,
+            )
+            dashboard_message = existing
+            return existing
+        except Exception as e:
+            print("Dashboard final recheck edit error:", e)
+            dashboard_message = None
 
     dashboard_message = await channel.send(
         embed=embed,
@@ -1480,14 +1518,15 @@ async def updater_loop():
                             sub["ready_notified"] = True
                             changed = True
 
-                            asyncio.create_task(
-                                send_ready_alert(
-                                    channel,
-                                    fc_key,
-                                    idx,
-                                    sub["name"],
-                                    rt
-                                )
+                            # Не запускаем отдельную параллельную задачу:
+                            # уведомление и перенос панели должны идти последовательно,
+                            # иначе два refresh_dashboard могут столкнуться.
+                            await send_ready_alert(
+                                channel,
+                                fc_key,
+                                idx,
+                                sub["name"],
+                                rt
                             )
 
             if changed:
