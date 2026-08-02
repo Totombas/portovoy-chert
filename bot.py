@@ -1451,6 +1451,91 @@ async def delete_ready_alert(channel, sub):
     sub["alert_channel_id"] = None
 
 
+async def cleanup_stale_ready_alerts(guild=None):
+    """Удаляет старые уведомления ГОТОВА, которые уже не соответствуют состоянию лодок."""
+    state = load_fleet_state()
+
+    # Берём канал таймера из сохранённой доски.
+    channel = None
+    channel_id = state.get("dashboard_channel_id")
+
+    if channel_id:
+        channel = client.get_channel(int(channel_id))
+        if channel is None:
+            try:
+                channel = await client.fetch_channel(int(channel_id))
+            except Exception:
+                channel = None
+
+    if channel is None and guild is not None:
+        for candidate in guild.text_channels:
+            name = candidate.name.lower()
+            if name in TIMER_CHANNEL_NAMES or "таймер" in name or "timer" in name:
+                channel = candidate
+                break
+
+    if channel is None:
+        return
+
+    # Для каждой лодки определяем, должна ли сейчас существовать плашка ГОТОВА.
+    expected_ready = {}
+    for fc_key in FC_CONFIG:
+        active = get_fc_active_count(state, fc_key)
+        for sub in state["fcs"][fc_key]["subs"][:active]:
+            rt = parse_iso_dt(sub.get("return_time"))
+            _, mins = format_remaining(rt)
+            expected_ready[sub["name"]] = (mins == 0)
+
+    kept_ready = set()
+    changed = False
+
+    try:
+        async for msg in channel.history(limit=200):
+            if msg.author.id != client.user.id or not msg.embeds:
+                continue
+
+            title = msg.embeds[0].title or ""
+            if "ГОТОВА" not in title:
+                continue
+
+            matched_name = next(
+                (name for name in expected_ready if name in title),
+                None,
+            )
+            if matched_name is None:
+                continue
+
+            should_exist = expected_ready[matched_name]
+
+            # Если лодка уже перезапущена — уведомление устарело.
+            # Если лодка всё ещё готова — оставляем только самое свежее уведомление.
+            if not should_exist or matched_name in kept_ready:
+                try:
+                    await msg.delete()
+                    print(f"Deleted stale ready alert on startup: {msg.id} ({matched_name})")
+                except Exception as e:
+                    print(f"Startup ready alert delete error {msg.id}:", e)
+            else:
+                kept_ready.add(matched_name)
+
+    except Exception as e:
+        print("Startup ready alert cleanup error:", e)
+
+    # Чистим потерянные ID у уже запущенных лодок.
+    for fc_key in FC_CONFIG:
+        active = get_fc_active_count(state, fc_key)
+        for sub in state["fcs"][fc_key]["subs"][:active]:
+            rt = parse_iso_dt(sub.get("return_time"))
+            _, mins = format_remaining(rt)
+            if mins != 0 and (sub.get("alert_message_id") or sub.get("alert_channel_id")):
+                sub["alert_message_id"] = None
+                sub["alert_channel_id"] = None
+                changed = True
+
+    if changed:
+        save_fleet_state(state)
+
+
 async def send_ready_alert(
     channel,
     fc_key,
@@ -1703,6 +1788,14 @@ async def on_ready():
     )
 
     print("Bot ready")
+
+    # После рестарта сразу убираем старые плашки ГОТОВА
+    # для лодок, которые уже были запущены заново.
+    try:
+        guild = client.guilds[0] if client.guilds else None
+        await cleanup_stale_ready_alerts(guild)
+    except Exception as e:
+        print("Initial ready alert cleanup error:", e)
 
     # on_ready может вызываться повторно после переподключения Discord.
     # Не запускаем второй updater_loop поверх уже работающего.
