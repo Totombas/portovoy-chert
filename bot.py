@@ -1387,9 +1387,6 @@ class TreasuryView(ui.View):
 async def delete_ready_alert(channel, sub):
     alert_message_id = sub.get("alert_message_id")
 
-    if not alert_message_id:
-        return
-
     alert_channel = channel
     alert_channel_id = sub.get("alert_channel_id")
 
@@ -1406,19 +1403,62 @@ async def delete_ready_alert(channel, sub):
             except Exception:
                 alert_channel = channel
 
-    try:
-        old_msg = await alert_channel.fetch_message(
-            int(alert_message_id)
-        )
-        await old_msg.delete()
-    except Exception:
-        pass
+    deleted = False
+
+    # Основной путь: удаляем сообщение по сохранённому ID.
+    if alert_message_id:
+        try:
+            old_msg = await alert_channel.fetch_message(
+                int(alert_message_id)
+            )
+            await old_msg.delete()
+            deleted = True
+        except Exception as e:
+            print(
+                f"Ready alert delete by ID error {alert_message_id}:",
+                e
+            )
+
+    # Страховка для старых уведомлений, ID которых мог потеряться
+    # из-за перезаписи состояния в updater_loop.
+    if not deleted:
+        try:
+            async for msg in alert_channel.history(limit=100):
+                if msg.author.id != client.user.id:
+                    continue
+
+                if not msg.embeds:
+                    continue
+
+                title = msg.embeds[0].title or ""
+
+                if (
+                    sub.get("name", "") in title and
+                    "ГОТОВА" in title
+                ):
+                    await msg.delete()
+                    deleted = True
+                    print(
+                        f"Deleted orphan ready alert: {msg.id} "
+                        f"({sub.get('name')})"
+                    )
+                    break
+
+        except Exception as e:
+            print("Ready alert fallback search error:", e)
 
     sub["alert_message_id"] = None
     sub["alert_channel_id"] = None
 
 
-async def send_ready_alert(channel, fc_key, sub_index, sub_name, rt):
+async def send_ready_alert(
+    channel,
+    fc_key,
+    sub_index,
+    sub_name,
+    rt,
+    state=None,
+):
     cfg = FC_CONFIG[fc_key]
     emoji = get_fc_emoji(
         channel.guild,
@@ -1456,7 +1496,9 @@ async def send_ready_alert(channel, fc_key, sub_index, sub_name, rt):
         embed=embed
     )
 
-    state = load_fleet_state()
+    if state is None:
+        state = load_fleet_state()
+
     sub = state["fcs"][fc_key]["subs"][sub_index - 1]
     sub["alert_message_id"] = msg.id
     sub["alert_channel_id"] = msg.channel.id
@@ -1491,8 +1533,6 @@ async def updater_loop():
                 else None
             )
 
-            changed = False
-
             if channel is not None:
                 for fc_key, cfg in FC_CONFIG.items():
                     active = get_fc_active_count(
@@ -1516,21 +1556,19 @@ async def updater_loop():
                             now_utc() >= rt
                         ):
                             sub["ready_notified"] = True
-                            changed = True
 
-                            # Не запускаем отдельную параллельную задачу:
-                            # уведомление и перенос панели должны идти последовательно,
-                            # иначе два refresh_dashboard могут столкнуться.
+                            # Важно: send_ready_alert сохраняет ID уведомления
+                            # в ЭТОТ ЖЕ объект state. Раньше функция сохраняла ID
+                            # в свежезагруженный state, а затем updater_loop
+                            # перезаписывал файл своей старой копией без ID.
                             await send_ready_alert(
                                 channel,
                                 fc_key,
                                 idx,
                                 sub["name"],
-                                rt
+                                rt,
+                                state=state,
                             )
-
-            if changed:
-                save_fleet_state(state)
 
             try:
                 treasury_data = load_treasury()
