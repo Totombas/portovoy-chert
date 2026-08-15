@@ -371,9 +371,70 @@ def load_fleet_state():
 def save_fleet_state(state):
     ensure_data_dir()
     state["state_version"] = 3
+    temp_file = FLEET_FILE + ".tmp"
 
-    with open(FLEET_FILE, "w", encoding="utf-8") as f:
+    # Сначала полностью пишем временный файл, затем атомарно подменяем основной.
+    # Так чтение никогда не увидит наполовину записанный JSON.
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp_file, FLEET_FILE)
+
+
+def save_dashboard_location(message_id, channel_id):
+    """Меняет только адрес доски, не перезаписывая таймеры старой копией state."""
+    state = load_fleet_state()
+    state["dashboard_message_id"] = message_id
+    state["dashboard_channel_id"] = channel_id
+    save_fleet_state(state)
+
+
+def apply_scanned_times(fc_key, active, new_times):
+    """Записывает результат OCR поверх самого свежего состояния и проверяет запись."""
+    expected_times = [
+        rt.isoformat()
+        for rt in new_times[:active]
+    ]
+
+    state = load_fleet_state()
+    fc = state["fcs"][fc_key]
+    fc["active_subs"] = active
+
+    for idx, return_time in enumerate(expected_times):
+        sub = fc["subs"][idx]
+        sub["return_time"] = return_time
+        sub["ready_notified"] = False
+        sub["alert_message_id"] = None
+        sub["alert_channel_id"] = None
+
+    save_fleet_state(state)
+
+    return scanned_times_match(
+        fc_key,
+        active,
+        new_times,
+    )
+
+
+def scanned_times_match(fc_key, active, new_times):
+    """Проверяет, что в файле остались именно таймеры принятого скрина."""
+    expected_times = [
+        rt.isoformat()
+        for rt in new_times[:active]
+    ]
+
+    verified = load_fleet_state()
+    verified_fc = verified["fcs"][fc_key]
+
+    return (
+        get_fc_active_count(verified, fc_key) == active and
+        [
+            sub.get("return_time")
+            for sub in verified_fc["subs"][:active]
+        ] == expected_times
+    )
 
 
 def get_fc_active_count(state, fc_key):
@@ -390,18 +451,9 @@ def parse_iso_dt(value):
         return None
 
 
-def parse_image(image_bytes):
-    img = Image.open(io.BytesIO(image_bytes))
-
-    img = img.convert("L")
-    img = img.resize((img.width * 4, img.height * 4))
-    img = ImageOps.autocontrast(img)
-    img = img.filter(ImageFilter.SHARPEN)
-    img = img.point(lambda x: 255 if x > 140 else 0)
-
-    text = pytesseract.image_to_string(img, config="--psm 6")
-
-    text = (
+def normalize_ocr_text(text):
+    """Исправляет типичные ошибки Tesseract именно в обозначениях времени."""
+    return (
         text
         .replace("Om", "0m")
         .replace("Oh", "0h")
@@ -412,49 +464,121 @@ def parse_image(image_bytes):
         .replace("O m", "0m")
     )
 
-    print("========== OCR ==========")
-    print(text)
-    print("=========================")
 
-    voyage_lines = []
+def extract_voyage_minutes(text):
+    """Возвращает длительности рейсов в том же порядке, что и на скрине."""
+    text = normalize_ocr_text(text)
 
-    for line in text.splitlines():
-        clean = line.strip()
-
-        if "Voyage complete in" in clean:
-            voyage_lines.append(clean)
+    # Ищем по всему тексту, а не только в строках с абсолютно точной фразой.
+    # Tesseract иногда меняет регистр, добавляет лишние пробелы или читает m как rn.
+    pattern = re.compile(
+        r"voyage\s+complete\s+in\s*"
+        r"(?:(\d+)\s*d\s*)?"
+        r"(?:(\d+)\s*h\s*)?"
+        r"(\d+)\s*(?:m|rn)\b",
+        re.IGNORECASE,
+    )
 
     result = []
 
-    for line in voyage_lines:
-        match = re.search(
-            r"Voyage complete in\s*"
-            r"(?:(\d+)d\s*)?"
-            r"(?:(\d+)h\s*)?"
-            r"(\d+)m",
-            line,
-            re.IGNORECASE,
-        )
-
-        if not match:
-            continue
-
+    for match in pattern.finditer(text):
         days = int(match.group(1) or 0)
         hours = int(match.group(2) or 0)
         minutes = int(match.group(3))
 
-        total_minutes = (
+        # Защита от случайных чисел, ошибочно принятых за таймер.
+        if hours >= 24 or minutes >= 60:
+            continue
+
+        result.append(
             days * 1440 +
             hours * 60 +
             minutes
         )
 
-        result.append(
-            now_utc() +
-            timedelta(minutes=total_minutes)
-        )
-
     return result
+
+
+def extract_deployed_count(text):
+    match = re.search(
+        r"vessels\s+deployed\s*:\s*([0-4])\s*/\s*4",
+        text,
+        re.IGNORECASE,
+    )
+
+    if match:
+        return int(match.group(1))
+
+    return None
+
+
+def parse_image(image_bytes):
+    source = Image.open(io.BytesIO(image_bytes)).convert("L")
+    source = source.resize((source.width * 4, source.height * 4))
+    source = ImageOps.autocontrast(source)
+    source = source.filter(ImageFilter.SHARPEN)
+    thresholded = source.point(lambda x: 255 if x > 140 else 0)
+
+    # Один и тот же скрин прогоняем несколькими безопасными способами.
+    # На небольшом Rank: 1 Tesseract иногда терял именно третью строку после
+    # бинаризации, хотя глазами и в сыром OCR она была видна полностью.
+    attempts = [
+        (thresholded, "--psm 6"),
+        (source, "--psm 6"),
+        (thresholded, "--psm 11"),
+    ]
+
+    parsed_attempts = []
+
+    for attempt_img, config in attempts:
+        text = normalize_ocr_text(
+            pytesseract.image_to_string(
+                attempt_img,
+                config=config,
+            )
+        )
+        minutes = extract_voyage_minutes(text)
+        deployed = extract_deployed_count(text)
+        parsed_attempts.append((text, minutes, deployed))
+
+    deployed_counts = [
+        deployed
+        for _, _, deployed in parsed_attempts
+        if deployed is not None
+    ]
+    expected_count = max(deployed_counts) if deployed_counts else None
+
+    # Предпочитаем вариант, где число найденных таймеров совпало с системной
+    # строкой Vessels deployed. Если заголовок не прочитался — берём самый
+    # результативный OCR-вариант.
+    best_text, best_minutes, best_deployed = max(
+        parsed_attempts,
+        key=lambda item: (
+            int(
+                expected_count is not None and
+                len(item[1]) == expected_count
+            ),
+            len(item[1]),
+            int(item[2] == expected_count),
+        ),
+    )
+
+    print("========== OCR ==========")
+    print(best_text)
+    print(
+        "Parsed timers:",
+        len(best_minutes),
+        "deployed:",
+        best_deployed,
+    )
+    print("=========================")
+
+    scan_time = now_utc()
+
+    return [
+        scan_time + timedelta(minutes=minutes)
+        for minutes in best_minutes[:4]
+    ], expected_count
 
 
 def get_ping_text():
@@ -936,9 +1060,12 @@ async def find_timer_dashboard_message(guild=None, cleanup_duplicates=True):
 
     dashboard_message = newest
 
-    state["dashboard_message_id"] = newest.id
-    state["dashboard_channel_id"] = newest.channel.id
-    save_fleet_state(state)
+    # После сетевых await исходный state уже мог устареть. Обновляем только ID
+    # доски поверх свежего файла, чтобы не затереть только что принятый скрин.
+    save_dashboard_location(
+        newest.id,
+        newest.channel.id,
+    )
 
     return dashboard_message
 
@@ -1036,11 +1163,10 @@ async def _refresh_dashboard_locked(channel=None, guild=None, move_to_bottom=Fal
         view=view,
     )
 
-    state = load_fleet_state()
-    state["dashboard_message_id"] = dashboard_message.id
-    state["dashboard_channel_id"] = dashboard_message.channel.id
-
-    save_fleet_state(state)
+    save_dashboard_location(
+        dashboard_message.id,
+        dashboard_message.channel.id,
+    )
 
     return dashboard_message
 
@@ -1533,7 +1659,21 @@ async def cleanup_stale_ready_alerts(guild=None):
                 changed = True
 
     if changed:
-        save_fleet_state(state)
+        # За время обхода истории мог прийти новый скрин. Перечитываем файл и
+        # чистим только служебные ID, не сохраняя устаревшие таймеры.
+        latest_state = load_fleet_state()
+
+        for fc_key in FC_CONFIG:
+            active = get_fc_active_count(latest_state, fc_key)
+            for sub in latest_state["fcs"][fc_key]["subs"][:active]:
+                rt = parse_iso_dt(sub.get("return_time"))
+                _, mins = format_remaining(rt)
+
+                if mins != 0:
+                    sub["alert_message_id"] = None
+                    sub["alert_channel_id"] = None
+
+        save_fleet_state(latest_state)
 
 
 async def send_ready_alert(
@@ -1542,7 +1682,6 @@ async def send_ready_alert(
     sub_index,
     sub_name,
     rt,
-    state=None,
 ):
     cfg = FC_CONFIG[fc_key]
     emoji = get_fc_emoji(
@@ -1581,13 +1720,24 @@ async def send_ready_alert(
         embed=embed
     )
 
-    if state is None:
-        state = load_fleet_state()
+    # Отправка сообщения содержит await, поэтому перед сохранением обязательно
+    # перечитываем состояние. Иначе updater мог вернуть старые таймеры поверх
+    # только что обработанного скрина.
+    latest_state = load_fleet_state()
+    sub = latest_state["fcs"][fc_key]["subs"][sub_index - 1]
 
-    sub = state["fcs"][fc_key]["subs"][sub_index - 1]
+    # Пока уведомление отправлялось, лодку могли уже перезапустить новым скрином.
+    if sub.get("return_time") != rt.isoformat():
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        return
+
+    sub["ready_notified"] = True
     sub["alert_message_id"] = msg.id
     sub["alert_channel_id"] = msg.channel.id
-    save_fleet_state(state)
+    save_fleet_state(latest_state)
 
     await refresh_dashboard(
         channel=channel,
@@ -1642,17 +1792,15 @@ async def updater_loop():
                         ):
                             sub["ready_notified"] = True
 
-                            # Важно: send_ready_alert сохраняет ID уведомления
-                            # в ЭТОТ ЖЕ объект state. Раньше функция сохраняла ID
-                            # в свежезагруженный state, а затем updater_loop
-                            # перезаписывал файл своей старой копией без ID.
+                            # send_ready_alert после отправки перечитает свежий
+                            # state и добавит только ID уведомления. Это не даёт
+                            # циклу затереть таймеры нового скрина старой копией.
                             await send_ready_alert(
                                 channel,
                                 fc_key,
                                 idx,
                                 sub["name"],
                                 rt,
-                                state=state,
                             )
 
             try:
@@ -1688,6 +1836,29 @@ async def updater_loop():
         )
 
 
+async def report_scan_error(message, reason):
+    """Явно сообщает об ошибке и оставляет режим ожидания скрина активным."""
+    try:
+        await message.add_reaction("❌")
+    except Exception:
+        pass
+
+    try:
+        await message.reply(
+            f"❌ Скрин не принят: {reason}",
+            mention_author=False,
+            delete_after=20,
+        )
+    except Exception as e:
+        print("Scan error reply failed:", e)
+
+    pending = pending_scans.get(message.author.id)
+    if pending:
+        pending["expires_at"] = now_utc() + timedelta(
+            seconds=SCAN_TIMEOUT_SECONDS
+        )
+
+
 async def handle_scan_image(message, fc_key):
     if not message.attachments:
         return False
@@ -1700,59 +1871,110 @@ async def handle_scan_image(message, fc_key):
     ):
         return False
 
-    state = load_fleet_state()
-    active = get_fc_active_count(
-        state,
-        fc_key
-    )
-
     try:
         img_bytes = await attachment.read()
-        new_times = parse_image(
+        new_times, deployed_count = parse_image(
             img_bytes
         )
 
         if not new_times:
-            await message.add_reaction(
-                "❌"
+            await report_scan_error(
+                message,
+                "не удалось распознать ни одного таймера. "
+                "Исходный скрин оставлен, можно сразу прислать следующий.",
             )
-            return True
+            return False
 
-        # Количество лодок определяется по успешно распознанным таймерам.
-        # Если на скрине появилось больше лодок, автоматически открываем новые слоты.
-        # Если OCR увидел меньше, чем уже было записано, считаем скрин неполным
-        # и не уменьшаем количество активных лодок автоматически.
+        # Строка Vessels deployed на скрине — главный источник количества лодок.
+        # Старое active_subs могло быть больше/меньше и раньше из-за этого бот
+        # отклонял даже корректный скрин с тремя полностью распознанными таймерами.
         found = min(4, len(new_times))
 
-        if found > active:
-            active = found
-            state["fcs"][fc_key]["active_subs"] = active
+        if deployed_count is not None:
+            deployed_count = max(0, min(4, deployed_count))
 
-        if found < active:
-            await message.add_reaction(
-                "❌"
+            # Заголовок говорит, сколько строк обязано быть распознано. Если
+            # таймеров меньше — не записываем неполные или сдвинутые данные.
+            if found != deployed_count:
+                print(
+                    "Scan rejected: timers/header mismatch",
+                    found,
+                    deployed_count,
+                )
+                await report_scan_error(
+                    message,
+                    (
+                        f"в заголовке лодок {deployed_count}, "
+                        f"а таймеров прочитано {found}. "
+                        "Исходный скрин не удалён."
+                    ),
+                )
+                return False
+
+            active = deployed_count
+        else:
+            # Запасной путь для скрина, где заголовок не попал в кадр.
+            state = load_fleet_state()
+            active = get_fc_active_count(
+                state,
+                fc_key
             )
-            return True
 
-        fc = state["fcs"][fc_key]
+            if found > active:
+                active = found
+
+            if found < active:
+                await report_scan_error(
+                    message,
+                    (
+                        f"прочитано только {found} из {active} таймеров. "
+                        "Исходный скрин не удалён."
+                    ),
+                )
+                return False
+
+        # Снимок нужен только для удаления старых уведомлений. После всех await
+        # состояние будет перечитано заново перед фактической записью таймеров.
+        state_snapshot = load_fleet_state()
+        fc_snapshot = state_snapshot["fcs"][fc_key]
 
         for idx, rt in enumerate(
             new_times[:active]
         ):
             await delete_ready_alert(
                 message.channel,
-                fc["subs"][idx]
+                fc_snapshot["subs"][idx]
             )
-            fc["subs"][idx]["return_time"] = rt.isoformat()
-            fc["subs"][idx]["ready_notified"] = False
 
-        save_fleet_state(state)
+        if not apply_scanned_times(
+            fc_key,
+            active,
+            new_times,
+        ):
+            await report_scan_error(
+                message,
+                "таймеры не прошли проверку после записи. Скрин не удалён.",
+            )
+            return False
 
         await refresh_dashboard(
             channel=message.channel,
             guild=message.guild,
             move_to_bottom=True,
         )
+
+        # Проверяем ещё раз после сетевого обновления доски: именно здесь раньше
+        # редкая параллельная запись могла молча вернуть старые таймеры.
+        if not scanned_times_match(
+            fc_key,
+            active,
+            new_times,
+        ):
+            await report_scan_error(
+                message,
+                "другая операция перезаписала таймеры. Скрин сохранён для повтора.",
+            )
+            return False
 
         try:
             await message.delete()
@@ -1766,11 +1988,12 @@ async def handle_scan_image(message, fc_key):
     except Exception as e:
         print("Scan error:", e)
 
-        await message.add_reaction(
-            "❌"
+        await report_scan_error(
+            message,
+            f"внутренняя ошибка `{type(e).__name__}`. Скрин не удалён.",
         )
 
-        return True
+        return False
 
 
 @client.event
