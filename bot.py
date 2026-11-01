@@ -5,6 +5,7 @@ import re
 import os
 import asyncio
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 import discord
 from discord import ui
@@ -20,6 +21,7 @@ TREASURY_FILE = os.path.join(DATA_DIR, "treasury.json")
 
 UPDATE_INTERVAL = 15
 SCAN_TIMEOUT_SECONDS = 120
+# Скрины принимаются автоматически только в канале таймеров.
 
 ANDRYUKHA_OFFSET = 5
 VALERA_OFFSET = 7
@@ -41,7 +43,6 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 # user_id -> {"fc_key": str, "expires_at": datetime}
-pending_scans = {}
 dashboard_message = None
 dashboard_lock = asyncio.Lock()
 updater_task = None
@@ -270,7 +271,7 @@ def get_fc_emoji(guild, fc_key):
 
 def default_fleet_state():
     return {
-        "state_version": 3,
+        "state_version": 4,
         "dashboard_message_id": None,
         "dashboard_channel_id": None,
         "fcs": {
@@ -279,6 +280,7 @@ def default_fleet_state():
                 "subs": [
                     {
                         "name": sub_name,
+                        "rank": None,
                         "return_time": None,
                         "ready_notified": False,
                         "alert_message_id": None,
@@ -323,6 +325,8 @@ def normalize_fleet_state(data):
 
                 return_time = old_sub.get("return_time")
                 state["fcs"][fc_key]["subs"][i]["return_time"] = return_time
+                rank = safe_int(old_sub.get("rank"), 0)
+                state["fcs"][fc_key]["subs"][i]["rank"] = rank if 1 <= rank <= 200 else None
                 state["fcs"][fc_key]["subs"][i]["ready_notified"] = bool(
                     old_sub.get("ready_notified", False)
                 )
@@ -370,7 +374,7 @@ def load_fleet_state():
 
 def save_fleet_state(state):
     ensure_data_dir()
-    state["state_version"] = 3
+    state["state_version"] = 4
     temp_file = FLEET_FILE + ".tmp"
 
     # Сначала полностью пишем временный файл, затем атомарно подменяем основной.
@@ -512,73 +516,77 @@ def extract_deployed_count(text):
     return None
 
 
-def parse_image(image_bytes):
+def parse_fleet_screenshot(image_bytes):
+    """Читает строки лодок целиком, чтобы таймеры не сдвигались из-за готовых лодок."""
     source = Image.open(io.BytesIO(image_bytes)).convert("L")
     source = source.resize((source.width * 4, source.height * 4))
-    source = ImageOps.autocontrast(source)
-    source = source.filter(ImageFilter.SHARPEN)
-    thresholded = source.point(lambda x: 255 if x > 140 else 0)
-
-    # Один и тот же скрин прогоняем несколькими безопасными способами.
-    # На небольшом Rank: 1 Tesseract иногда терял именно третью строку после
-    # бинаризации, хотя глазами и в сыром OCR она была видна полностью.
-    attempts = [
-        (thresholded, "--psm 6"),
-        (source, "--psm 6"),
-        (thresholded, "--psm 11"),
-    ]
-
-    parsed_attempts = []
-
-    for attempt_img, config in attempts:
-        text = normalize_ocr_text(
-            pytesseract.image_to_string(
-                attempt_img,
-                config=config,
-            )
-        )
-        minutes = extract_voyage_minutes(text)
-        deployed = extract_deployed_count(text)
-        parsed_attempts.append((text, minutes, deployed))
-
-    deployed_counts = [
-        deployed
-        for _, _, deployed in parsed_attempts
-        if deployed is not None
-    ]
-    expected_count = max(deployed_counts) if deployed_counts else None
-
-    # Предпочитаем вариант, где число найденных таймеров совпало с системной
-    # строкой Vessels deployed. Если заголовок не прочитался — берём самый
-    # результативный OCR-вариант.
-    best_text, best_minutes, best_deployed = max(
-        parsed_attempts,
-        key=lambda item: (
-            int(
-                expected_count is not None and
-                len(item[1]) == expected_count
-            ),
-            len(item[1]),
-            int(item[2] == expected_count),
-        ),
-    )
-
-    print("========== OCR ==========")
-    print(best_text)
-    print(
-        "Parsed timers:",
-        len(best_minutes),
-        "deployed:",
-        best_deployed,
-    )
-    print("=========================")
-
-    scan_time = now_utc()
-
-    return [
-        scan_time + timedelta(minutes=minutes)
-        for minutes in best_minutes[:4]
-    ], expected_count
+    source = ImageOps.autocontrast(source).filter(ImageFilter.SHARPEN)
+    binary = source.point(lambda x: 255 if x > 140 else 0)
+    variants = [(source, "--psm 6"), (binary, "--psm 6"), (source, "--psm 11")]
+    candidates = []
+    for img, config in variants:
+        raw = pytesseract.image_to_string(img, config=config)
+        lines = [normalize_ocr_text(x).strip() for x in raw.splitlines()]
+        deployed = extract_deployed_count("\n".join(lines))
+        rows = []
+        for line in lines:
+            # OCR иногда путает номер лодки с ?/l/I; для номера 1 есть запасной путь.
+            match = re.search(r"(?i)\b([a-z][a-z0-9_-]{2,})\s*[-–]\s*([1-4Il|?])\s*[.,:]?\s*\(?\s*rank\s*[:;]\s*(\d{1,3})", line)
+            if not match:
+                continue
+            name = match.group(1).lower()
+            number = match.group(2).translate(str.maketrans({"I": "1", "l": "1", "|": "1", "?": "1"}))
+            rank = int(match.group(3))
+            if not (1 <= rank <= 200):
+                continue
+            timer_match = re.search(r"(?i)voyage\s+complete\s+in\s*(?:(\d+)\s*d\s*)?(?:(\d+)\s*h\s*)?(\d+)\s*(?:m|rn)\b", line)
+            minutes = None
+            if timer_match:
+                d, h, m = (int(x or 0) for x in timer_match.groups())
+                if h < 24 and m < 60:
+                    minutes = d * 1440 + h * 60 + m
+            rows.append({"name": name, "index": int(number), "rank": rank, "minutes": minutes, "line": line})
+        candidates.append((rows, deployed, raw))
+    # Приоритет: максимальное число строк с рангом и распознанными таймерами.
+    rows, deployed, raw = max(candidates, key=lambda x: (len(x[0]), sum(r["minutes"] is not None for r in x[0])))
+    print("========== FLEET OCR ==========\n", raw, "\nParsed:", rows)
+    if not rows:
+        return None, "не найдены строки подлодок с рангами"
+    # Определяем FC по названиям лодок, а не по выбранной пользователем кнопке.
+    votes = {}
+    for key, cfg in FC_CONFIG.items():
+        expected = [re.sub(r"[^a-z0-9]", "", n.lower().rsplit("-", 1)[0]) for n in cfg["subs"]]
+        score = 0
+        for row in rows:
+            normalized = re.sub(r"[^a-z0-9]", "", row["name"])
+            if any(SequenceMatcher(None, normalized, item).ratio() >= 0.78 for item in expected):
+                score += 1
+        if score:
+            votes[key] = score
+    if not votes:
+        return None, "не удалось определить гильдию по названиям лодок"
+    best = max(votes.values())
+    winners = [k for k, v in votes.items() if v == best]
+    if len(winners) != 1 or best < max(1, (len(rows) + 1) // 2):
+        return None, "гильдия определяется неоднозначно"
+    fc_key = winners[0]
+    # Для уникальных названий E.V.A. номер определяется по имени, а не по OCR цифры.
+    normalized_expected = {re.sub(r"[^a-z0-9]", "", n.lower()): i for i, n in enumerate(FC_CONFIG[fc_key]["subs"], 1)}
+    by_index = {}
+    for row in rows:
+        idx = row["index"]
+        if fc_key == "eva":
+            best_name, similarity = max(((i, SequenceMatcher(None, re.sub(r"[^a-z0-9]", "", row["name"]), n).ratio()) for n, i in normalized_expected.items()), key=lambda x: x[1])
+            if similarity >= 0.68:
+                idx = best_name
+        if idx in by_index:
+            return None, "повторился номер подлодки при распознавании"
+        by_index[idx] = row
+    if set(by_index) != set(range(1, len(rows) + 1)):
+        return None, "не все номера лодок распознаны последовательно"
+    if deployed is not None and sum(r["minutes"] is not None for r in rows) != deployed:
+        return None, f"таймеров найдено {sum(r['minutes'] is not None for r in rows)}, а в заголовке {deployed}"
+    return {"fc_key": fc_key, "rows": by_index, "scan_time": now_utc()}, None
 
 
 def get_ping_text():
@@ -882,17 +890,18 @@ def build_fc_field(state, fc_key):
         rt = parse_iso_dt(sub.get("return_time"))
         left, mins = format_remaining(rt)
         dot = status_dot(mins)
+        rank_label = f" · ур. {sub['rank']}" if sub.get("rank") else ""
 
         if rt is None:
             lines.append(
-                f"**{idx}. {sub['name']}**"
+                f"**{idx}. {sub['name']}{rank_label}**"
                 f"{dot} —"
             )
             continue
 
         if mins == 0:
             lines.append(
-                f"**{idx}. {sub['name']}**"
+                f"**{idx}. {sub['name']}{rank_label}**"
                 f"🟢 **ГОТОВО**\n"
             )
             continue
@@ -904,7 +913,7 @@ def build_fc_field(state, fc_key):
         val_time = f"{weekday_ru(val_dt)} {val_dt:%H:%M}"
 
         lines.append(
-            f"**{idx}. {sub['name']}**"
+            f"**{idx}. {sub['name']}{rank_label}**"
             f"{dot} **{left}**\n"
             f"🕒 **{and_time} / {val_time}**"
         )
@@ -1094,7 +1103,7 @@ async def _refresh_dashboard_locked(channel=None, guild=None, move_to_bottom=Fal
             guild = channel.guild
 
     embed = build_dashboard_embed(guild)
-    view = FleetSelectView(guild=guild)
+    view = None
 
     if message is not None and not move_to_bottom:
         try:
@@ -1137,7 +1146,7 @@ async def _refresh_dashboard_locked(channel=None, guild=None, move_to_bottom=Fal
     if guild is None:
         guild = channel.guild
         embed = build_dashboard_embed(guild)
-        view = FleetSelectView(guild=guild)
+        view = None
 
     # Последняя проверка прямо перед созданием нового сообщения.
     # Если другая корутина уже успела создать доску, просто обновляем ее.
@@ -1263,71 +1272,6 @@ async def refresh_treasury_message(interaction=None, channel=None):
         save_treasury(data)
 
     return message
-
-
-class FleetSelectView(ui.View):
-
-    def __init__(self, guild=None):
-        super().__init__(
-            timeout=None
-        )
-
-        state = load_fleet_state()
-        fc_keys = list(FC_CONFIG)
-
-        for fc_key, cfg in FC_CONFIG.items():
-            active = get_fc_active_count(
-                state,
-                fc_key
-            )
-
-            row = (
-                0
-                if fc_keys.index(fc_key) < 4
-                else 1
-            )
-
-            button = ui.Button(
-                label=cfg["title"],
-                emoji=get_fc_emoji(guild, fc_key),
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"fleet_select:{fc_key}",
-                row=row,
-                disabled=False,
-            )
-
-            button.callback = self.make_select_callback(
-                fc_key
-            )
-
-            self.add_item(button)
-
-    def make_select_callback(self, fc_key):
-        async def callback(interaction):
-            pending_scans[interaction.user.id] = {
-                "fc_key": fc_key,
-                "expires_at": now_utc() + timedelta(
-                    seconds=SCAN_TIMEOUT_SECONDS
-                ),
-            }
-
-            cfg = FC_CONFIG[fc_key]
-            emoji = get_fc_emoji(
-                interaction.guild,
-                fc_key
-            )
-
-            await interaction.response.send_message(
-                (
-                    f"{emoji} Жду скрин для "
-                    f"**{cfg['title']}** "
-                    f"{SCAN_TIMEOUT_SECONDS} сек."
-                ),
-                ephemeral=True,
-                delete_after=10,
-            )
-
-        return callback
 
 
 class GoldModal(ui.Modal):
@@ -1859,140 +1803,46 @@ async def report_scan_error(message, reason):
         )
 
 
-async def handle_scan_image(message, fc_key):
-    if not message.attachments:
+async def handle_scan_image(message):
+    attachments = [a for a in message.attachments if a.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+    if not attachments:
         return False
-
-    attachment = message.attachments[0]
-    lower_name = attachment.filename.lower()
-
-    if not lower_name.endswith(
-        (".png", ".jpg", ".jpeg")
-    ):
-        return False
-
     try:
-        img_bytes = await attachment.read()
-        new_times, deployed_count = parse_image(
-            img_bytes
-        )
-
-        if not new_times:
-            await report_scan_error(
-                message,
-                "не удалось распознать ни одного таймера. "
-                "Исходный скрин оставлен, можно сразу прислать следующий.",
-            )
+        result, error = await asyncio.to_thread(parse_fleet_screenshot, await attachments[0].read())
+        if error:
+            await report_scan_error(message, error + ". Скрин оставлен.")
             return False
-
-        # Строка Vessels deployed на скрине — главный источник количества лодок.
-        # Старое active_subs могло быть больше/меньше и раньше из-за этого бот
-        # отклонял даже корректный скрин с тремя полностью распознанными таймерами.
-        found = min(4, len(new_times))
-
-        if deployed_count is not None:
-            deployed_count = max(0, min(4, deployed_count))
-
-            # Заголовок говорит, сколько строк обязано быть распознано. Если
-            # таймеров меньше — не записываем неполные или сдвинутые данные.
-            if found != deployed_count:
-                print(
-                    "Scan rejected: timers/header mismatch",
-                    found,
-                    deployed_count,
-                )
-                await report_scan_error(
-                    message,
-                    (
-                        f"в заголовке лодок {deployed_count}, "
-                        f"а таймеров прочитано {found}. "
-                        "Исходный скрин не удалён."
-                    ),
-                )
-                return False
-
-            active = deployed_count
-        else:
-            # Запасной путь для скрина, где заголовок не попал в кадр.
-            state = load_fleet_state()
-            active = get_fc_active_count(
-                state,
-                fc_key
-            )
-
-            if found > active:
-                active = found
-
-            if found < active:
-                await report_scan_error(
-                    message,
-                    (
-                        f"прочитано только {found} из {active} таймеров. "
-                        "Исходный скрин не удалён."
-                    ),
-                )
-                return False
-
-        # Снимок нужен только для удаления старых уведомлений. После всех await
-        # состояние будет перечитано заново перед фактической записью таймеров.
-        state_snapshot = load_fleet_state()
-        fc_snapshot = state_snapshot["fcs"][fc_key]
-
-        for idx, rt in enumerate(
-            new_times[:active]
-        ):
-            await delete_ready_alert(
-                message.channel,
-                fc_snapshot["subs"][idx]
-            )
-
-        if not apply_scanned_times(
-            fc_key,
-            active,
-            new_times,
-        ):
-            await report_scan_error(
-                message,
-                "таймеры не прошли проверку после записи. Скрин не удалён.",
-            )
-            return False
-
-        await refresh_dashboard(
-            channel=message.channel,
-            guild=message.guild,
-            move_to_bottom=True,
-        )
-
-        # Проверяем ещё раз после сетевого обновления доски: именно здесь раньше
-        # редкая параллельная запись могла молча вернуть старые таймеры.
-        if not scanned_times_match(
-            fc_key,
-            active,
-            new_times,
-        ):
-            await report_scan_error(
-                message,
-                "другая операция перезаписала таймеры. Скрин сохранён для повтора.",
-            )
-            return False
-
+        fc_key, rows, scan_time = result["fc_key"], result["rows"], result["scan_time"]
+        state = load_fleet_state()
+        fc = state["fcs"][fc_key]
+        for idx, row in sorted(rows.items()):
+            await delete_ready_alert(message.channel, fc["subs"][idx - 1])
+        # После сетевых вызовов обязательно перечитываем JSON.
+        state = load_fleet_state()
+        fc = state["fcs"][fc_key]
+        fc["active_subs"] = len(rows)
+        for idx, row in sorted(rows.items()):
+            sub = fc["subs"][idx - 1]
+            sub["rank"] = row["rank"]
+            if row["minutes"] is None:
+                sub["return_time"] = scan_time.isoformat()
+                sub["ready_notified"] = True  # Уже готова на скрине, не пингуем повторно.
+            else:
+                sub["return_time"] = (scan_time + timedelta(minutes=row["minutes"])).isoformat()
+                sub["ready_notified"] = False
+            sub["alert_message_id"] = None
+            sub["alert_channel_id"] = None
+        save_fleet_state(state)
+        await refresh_dashboard(channel=message.channel, guild=message.guild, move_to_bottom=True)
         try:
             await message.delete()
-        except Exception:
-            pass
-
-        print(f"Fleet updated: {fc_key}")
-
+        except discord.Forbidden:
+            print("Need Manage Messages permission to delete screenshots")
+        print(f"Fleet auto-updated: {fc_key}; ranks: {[r['rank'] for r in rows.values()]}")
         return True
-
-    except Exception as e:
-        print("Scan error:", e)
-
-        await report_scan_error(
-            message,
-            f"внутренняя ошибка `{type(e).__name__}`. Скрин не удалён.",
-        )
-
+    except Exception as exc:
+        print("Auto-scan error:", exc)
+        await report_scan_error(message, f"ошибка {type(exc).__name__}; скрин оставлен")
         return False
 
 
@@ -2001,10 +1851,6 @@ async def on_ready():
     global updater_task
 
     print(f"Logged as {client.user}")
-
-    client.add_view(
-        FleetSelectView()
-    )
 
     client.add_view(
         TreasuryView()
@@ -2071,39 +1917,6 @@ async def on_message(message):
 
         return
 
-    # Быстрый ручной выбор без кнопки: !scan leviathan
-    if (
-        low.startswith("!scan ") or
-        low.startswith("!скан ")
-    ):
-        raw_fc = content.split(
-            maxsplit=1
-        )[1]
-
-        fc_key = resolve_fc_key(
-            raw_fc
-        )
-
-        if fc_key is None:
-            await message.add_reaction(
-                "❌"
-            )
-            return
-
-        pending_scans[message.author.id] = {
-            "fc_key": fc_key,
-            "expires_at": now_utc() + timedelta(
-                seconds=SCAN_TIMEOUT_SECONDS
-            ),
-        }
-
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
-        return
-
     # Меняем количество активных лодок: !slots leviathan 2
     if (
         low.startswith("!slots ") or
@@ -2153,34 +1966,10 @@ async def on_message(message):
 
         return
 
-    if message.attachments:
-        pending = pending_scans.get(
-            message.author.id
-        )
-
-        if (
-            pending and
-            now_utc() <= pending["expires_at"]
-        ):
-            fc_key = pending["fc_key"]
-
-            handled = await handle_scan_image(
-                message,
-                fc_key
-            )
-
-            if handled:
-                pending_scans.pop(
-                    message.author.id,
-                    None
-                )
-                return
-
-        elif pending:
-            pending_scans.pop(
-                message.author.id,
-                None
-            )
+    if message.attachments and message.guild is not None:
+        channel_name = getattr(message.channel, "name", "").lower()
+        if channel_name in TIMER_CHANNEL_NAMES or "таймер" in channel_name or "timer" in channel_name:
+            await handle_scan_image(message)
 
 
 if TOKEN is None:
