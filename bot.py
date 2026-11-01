@@ -532,11 +532,27 @@ def parse_fleet_screenshot(image_bytes):
         for line in lines:
             # OCR иногда путает номер лодки с ?/l/I; для номера 1 есть запасной путь.
             match = re.search(r"(?i)\b([a-z][a-z0-9_-]{2,})\s*[-–]\s*([1-4Il|?])\s*[.,:]?\s*\(?\s*rank\s*[:;]\s*(\d{1,3})", line)
+            eva_index = None
             if not match:
-                continue
-            name = match.group(1).lower()
-            number = match.group(2).translate(str.maketrans({"I": "1", "l": "1", "|": "1", "?": "1"}))
-            rank = int(match.group(3))
+                # В E.V.A. названия уникальные: игра показывает их без номеров -1/-2.
+                # Узнаём лодку по полному имени перед (Rank: ...).
+                eva_match = re.search(r"(?i)^\s*(.+?)\s*\(?\s*rank\s*[:;]\s*(\d{1,3})\s*\)?", line)
+                if eva_match:
+                    scanned_name = re.sub(r"[^a-z0-9]", "", eva_match.group(1).lower())
+                    similarities = [(SequenceMatcher(None, scanned_name, re.sub(r"[^a-z0-9]", "", expected.lower())).ratio(), i)
+                                    for i, expected in enumerate(FC_CONFIG["eva"]["subs"], 1)]
+                    similarity, eva_index = max(similarities)
+                    if similarity < 0.72:
+                        continue
+                    name = eva_match.group(1).lower()
+                    number = str(eva_index)
+                    rank = int(eva_match.group(2))
+                else:
+                    continue
+            else:
+                name = match.group(1).lower()
+                number = match.group(2).translate(str.maketrans({"I": "1", "l": "1", "|": "1", "?": "1"}))
+                rank = int(match.group(3))
             if not (1 <= rank <= 200):
                 continue
             timer_match = re.search(r"(?i)voyage\s+complete\s+in\s*(?:(\d+)\s*d\s*)?(?:(\d+)\s*h\s*)?(\d+)\s*(?:m|rn)\b", line)
