@@ -531,7 +531,7 @@ def parse_fleet_screenshot(image_bytes):
         rows = []
         for line in lines:
             # OCR иногда путает номер лодки с ?/l/I; для номера 1 есть запасной путь.
-            match = re.search(r"(?i)\b([a-z][a-z0-9_-]{2,})\s*[-–]\s*([1-4Il|?])\s*[.,:]?\s*\(?\s*rank\s*[:;]\s*(\d{1,3})", line)
+            match = re.search(r"(?i)\b([a-z][a-z0-9_-]{2,})\s*[-–]\s*([0-9Il|?]{1,2})\s*[.,:]?\s*\(?\s*rank\s*[:;]\s*(\d{1,3})", line)
             eva_index = None
             if not match:
                 # В E.V.A. названия уникальные: игра показывает их без номеров -1/-2.
@@ -551,7 +551,12 @@ def parse_fleet_screenshot(image_bytes):
                     continue
             else:
                 name = match.group(1).lower()
-                number = match.group(2).translate(str.maketrans({"I": "1", "l": "1", "|": "1", "?": "1"}))
+                number_raw = match.group(2)
+                # OCR может принять Mog-1 за Mog-7 или Mog-?7.
+                # Не угадываем сразу: ниже восстанавливаем единственный пропущенный номер.
+                number = number_raw.translate(str.maketrans({"I": "1", "l": "1", "|": "1", "?": ""}))
+                if not number.isdigit():
+                    number = "0"
                 rank = int(match.group(3))
             if not (1 <= rank <= 200):
                 continue
@@ -564,7 +569,7 @@ def parse_fleet_screenshot(image_bytes):
             rows.append({"name": name, "index": int(number), "rank": rank, "minutes": minutes, "line": line})
         candidates.append((rows, deployed, raw))
     # Приоритет: максимальное число строк с рангом и распознанными таймерами.
-    rows, deployed, raw = max(candidates, key=lambda x: (len(x[0]), sum(r["minutes"] is not None for r in x[0])))
+    rows, deployed, raw = max(candidates, key=lambda x: (len(x[0]), sum(1 <= r["index"] <= 4 for r in x[0]), sum(r["minutes"] is not None for r in x[0])))
     print("========== FLEET OCR ==========\n", raw, "\nParsed:", rows)
     if not rows:
         return None, "не найдены строки подлодок с рангами"
@@ -599,7 +604,16 @@ def parse_fleet_screenshot(image_bytes):
             return None, "повторился номер подлодки при распознавании"
         by_index[idx] = row
     if set(by_index) != set(range(1, len(rows) + 1)):
-        return None, "не все номера лодок распознаны последовательно"
+        # Безопасная коррекция единственной ошибочной цифры OCR: если из 4 лодок
+        # три распознаны однозначно, оставшуюся назначаем на отсутствующее место.
+        # Название ФК уже проверено выше; никаких таймеров не переставляем.
+        expected_indices = set(range(1, len(rows) + 1))
+        missing = expected_indices - set(by_index)
+        extra = set(by_index) - expected_indices
+        if len(missing) == 1 and len(extra) == 1 and len(by_index) == len(rows):
+            by_index[missing.pop()] = by_index.pop(extra.pop())
+        else:
+            return None, "не все номера лодок распознаны последовательно"
     if deployed is not None and sum(r["minutes"] is not None for r in rows) != deployed:
         return None, f"таймеров найдено {sum(r['minutes'] is not None for r in rows)}, а в заголовке {deployed}"
     return {"fc_key": fc_key, "rows": by_index, "scan_time": now_utc()}, None
@@ -1812,11 +1826,7 @@ async def report_scan_error(message, reason):
     except Exception as e:
         print("Scan error reply failed:", e)
 
-    pending = pending_scans.get(message.author.id)
-    if pending:
-        pending["expires_at"] = now_utc() + timedelta(
-            seconds=SCAN_TIMEOUT_SECONDS
-        )
+
 
 
 async def handle_scan_image(message):
